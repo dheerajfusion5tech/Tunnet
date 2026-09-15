@@ -11,7 +11,7 @@ const reactExternals = [
   "react",
   "react-dom",
   "react-dom/server",
-  "react-dom/server.bun",
+  "react-dom/server.node",
   "react/jsx-runtime",
   "react/jsx-dev-runtime",
 ];
@@ -24,6 +24,11 @@ const config = defineConfig({
       preset: "bun",
       rollupConfig: {
         external: [/^@sentry\//, ...reactExternals],
+        output: {
+          paths: {
+            "react-dom/server": "react-dom/server.node",
+          },
+        },
       },
     }),
     tailwindcss(),
