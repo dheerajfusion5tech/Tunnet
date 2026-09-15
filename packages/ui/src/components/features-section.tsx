@@ -4,7 +4,7 @@ import { cn } from "#lib/utils";
 import createGlobe from "cobe";
 import { useEffect, useRef } from "react";
 import { motion } from "motion/react";
-import { IconBrandYoutubeFilled } from "@tabler/icons-react";
+import { TbBrandYoutubeFilled } from "react-icons/tb";
 
 export default function FeaturesSectionDemo() {
   const features = [
@@ -135,7 +135,7 @@ export const SkeletonThree = () => {
       <div className="group mx-auto h-full w-full bg-transparent dark:bg-transparent">
         <div className="relative flex h-full w-full flex-1 flex-col space-y-2">
           {/* TODO */}
-          <IconBrandYoutubeFilled className="absolute inset-0 z-10 m-auto h-20 w-20 text-red-500" />
+          <TbBrandYoutubeFilled className="absolute inset-0 z-10 m-auto h-20 w-20 text-red-500" />
           <img
             src="https://assets.aceternity.com/fireship.jpg"
             alt="header"

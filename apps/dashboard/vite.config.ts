@@ -22,7 +22,18 @@ const config = defineConfig({
   plugins: [
     devtools(),
     nitro({
-      rollupConfig: { external: [/^@sentry\//] },
+      preset: "bun",
+      rollupConfig: {
+        external: [
+          /^@sentry\//,
+          "react",
+          "react-dom",
+          "react-dom/server",
+          "react-dom/server.bun",
+          "react/jsx-runtime",
+          "react/jsx-dev-runtime",
+        ],
+      },
       ...(managementApiUrl
         ? {
             routeRules: {

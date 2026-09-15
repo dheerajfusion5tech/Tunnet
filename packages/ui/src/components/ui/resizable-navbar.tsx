@@ -1,6 +1,6 @@
 "use client";
 import { cn } from "#lib/utils";
-import { IconMenu2, IconX } from "@tabler/icons-react";
+import { TbMenu2, TbX } from "react-icons/tb";
 import {
   motion,
   useScroll,
@@ -275,7 +275,7 @@ export const MobileNavToggle = ({
       aria-label={isOpen ? "Close menu" : "Open menu"}
       onClick={onClick}
     >
-      {isOpen ? <IconX /> : <IconMenu2 />}
+      {isOpen ? <TbX /> : <TbMenu2 />}
     </button>
   );
 };
