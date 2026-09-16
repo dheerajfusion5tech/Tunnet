@@ -10,7 +10,6 @@ const MODES = {
   managed: {
     id: "managed" as const,
     title: "Managed",
-    kicker: "Teams and orgs",
     body: "SSO, a dashboard, and audit for the team. Hosted by us or you. This is how most companies run Tunnet.",
     code: `curl -fsSL https://get.tunnet.io | sh
 sudo tunnet enroll --control-url https://app.tunnet.io --token $TOKEN
@@ -19,7 +18,6 @@ tunnet status --peers`,
   direct: {
     id: "direct" as const,
     title: "Direct",
-    kicker: "Open-source laptop mesh",
     body: "Open source. A private mesh with a passphrase. No account, no bill. Built for a personal fleet.",
     code: `sudo tunnet create --name my-net --secret "a-strong-passphrase"
 tunnet invite --name my-net
@@ -58,17 +56,7 @@ export function TwoModesSection(): ReactNode {
                       : "border-[var(--l1-steel)] bg-[var(--l1-panel)] hover:border-[var(--l1-steel-strong)]",
                   )}
                 >
-                  <p
-                    className={cn(
-                      "l1-label",
-                      selected
-                        ? "text-[var(--l1-on-fg-muted)]"
-                        : "text-[var(--l1-muted-2)]",
-                    )}
-                  >
-                    {item.kicker}
-                  </p>
-                  <h3 className="mt-2 text-[22px] font-semibold tracking-tight">
+                  <h3 className="text-[22px] font-semibold tracking-tight">
                     {item.title}
                   </h3>
                   <p
