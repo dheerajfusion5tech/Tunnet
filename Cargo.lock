@@ -11079,7 +11079,7 @@ dependencies = [
  "hex",
  "hickory-proto",
  "hickory-resolver",
- "hmac",
+ "hkdf",
  "http-body-util",
  "httparse",
  "hyper",
