@@ -3,22 +3,44 @@ name: CI
 on:
   push:
     branches: ["main"]
-    paths-ignore:
-      - "apps/docs/**"
-      - "**.md"
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "apps/android/**"
+      - ".github/workflows/ci.yml"
+
   pull_request:
     branches: ["main"]
-    paths-ignore:
-      - "apps/docs/**"
-      - "**.md"
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - "apps/android/**"
+      - ".github/workflows/ci.yml"
 
 jobs:
   rust:
-    name: Rust
-    runs-on: [ubuntu-latest]
+    name: Rust + Android
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_API_LEVEL: "36"
+      ANDROID_BUILD_TOOLS_VERSION: "36.0.0"
+      ANDROID_NDK_VERSION: "30.0.16248370"
+      ANDROID_MIN_SDK: "26"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-key: rust-android
 
       - name: Install mold
         uses: rui314/setup-mold@v1
@@ -40,6 +62,75 @@ jobs:
       - name: Clippy (SDK direct)
         run: cargo clippy -p tunnet --no-default-features --features direct -- -D warnings
 
+      - name: Add Android Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
+
+      - name: Install Android toolchain
+        run: |
+          sdkmanager --install \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+          NDK="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          test -d "$NDK"
+
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+
+      - name: Clippy (Android)
+        run: |
+          BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android${ANDROID_MIN_SDK}-clang"
+          export CC_aarch64_linux_android="$BIN/aarch64-linux-android${ANDROID_MIN_SDK}-clang"
+          export AR_aarch64_linux_android="$BIN/llvm-ar"
+
+          cargo clippy \
+            -p tunnet-mobile \
+            -p tunnet-agent \
+            --target aarch64-linux-android \
+            -- -D warnings
+
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$BIN/x86_64-linux-android${ANDROID_MIN_SDK}-clang"
+          export CC_x86_64_linux_android="$BIN/x86_64-linux-android${ANDROID_MIN_SDK}-clang"
+          export AR_x86_64_linux_android="$BIN/llvm-ar"
+
+          cargo clippy \
+            -p tunnet-mobile \
+            -p tunnet-agent \
+            --target x86_64-linux-android \
+            -- -D warnings
+
+      - name: Build and check Android app
+        working-directory: apps/android
+        run: |
+          ./gradlew \
+            :app:lintDebug \
+            :app:testDebugUnitTest \
+            :app:assembleDebug \
+            --build-cache \
+            --stacktrace
+
+      - name: Verify packaged native libraries
+        working-directory: apps/android
+        run: ./check-apk-abis.sh
+
   test:
     name: Rust tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -47,6 +138,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -70,82 +162,3 @@ jobs:
 
       - name: Run workspace doctests
         run: cargo test --workspace --exclude tunnet-desktop --all-features --doc
-
-  android:
-    name: Android
-    runs-on: [ubuntu-latest]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: android
-
-      # rustup targets are per-toolchain, so a toolchain bump silently drops
-      # them and the cross-compile fails with "can't find crate for `core`".
-      # Adding them here is what makes that a CI concern rather than a
-      # confusing error on someone's machine.
-      - name: Add Android Rust targets
-        run: rustup target add aarch64-linux-android x86_64-linux-android
-
-      - name: Set up JDK
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      # Gradle's cargoBuildAgent cross-compiles per ABI with the NDK's clang,
-      # so the assemble below covers the Rust build too. Running the agent
-      # crate on its own first keeps a Rust-only break legible, rather than
-      # surfacing it as a Gradle failure.
-      # The NDK comes from the runner image; setup-android does not install one
-      # unless asked. Pinning it here and exporting ANDROID_NDK_HOME means the
-      # Gradle leg below resolves the same toolchain (ndkDir() honours the env
-      # first) rather than picking its own by a different rule.
-      - name: Select the NDK
-        run: |
-          if [ ! -d "$ANDROID_SDK_ROOT/ndk" ]; then
-            echo "no NDK under $ANDROID_SDK_ROOT/ndk; install one via setup-android packages:" >&2
-            exit 1
-          fi
-          NDK="$ANDROID_SDK_ROOT/ndk/$(ls "$ANDROID_SDK_ROOT/ndk" | sort -V | tail -1)"
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
-          echo "using NDK $NDK"
-
-      # `-D warnings` matches the host Clippy job: no host job builds this
-      # target, so warnings here went unnoticed.
-      - name: Cross-compile the agent (arm64 only; a x86_64-only break surfaces in the Gradle leg)
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: |
-          BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android26-clang"
-          export CC_aarch64_linux_android="$BIN/aarch64-linux-android26-clang"
-          export AR_aarch64_linux_android="$BIN/llvm-ar"
-          cargo build -p tunnet-mobile --target aarch64-linux-android --release
-
-      # The JNI bridge is `cfg(target_os = "android")`, so no host job lints it.
-      - name: Clippy (Android target)
-        env:
-          RUSTFLAGS: "-D warnings"
-        run: |
-          BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android26-clang"
-          export CC_aarch64_linux_android="$BIN/aarch64-linux-android26-clang"
-          export AR_aarch64_linux_android="$BIN/llvm-ar"
-          cargo clippy -p tunnet-mobile -p tunnet-agent --target aarch64-linux-android -- -D warnings
-
-      - name: Assemble the APK
-        working-directory: apps/android
-        run: ./gradlew :app:assembleDebug --no-daemon
-
-      # A missing ABI is invisible until someone installs on that architecture
-      # and hits UnsatisfiedLinkError.
-      - name: Verify APK carries both ABIs
-        working-directory: apps/android
-        run: ./check-apk-abis.sh
