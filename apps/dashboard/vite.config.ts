@@ -10,15 +10,6 @@ import { defineConfig } from "vite";
 
 const managementApiUrl = getManagementUrl();
 
-const reactExternals = [
-  "react",
-  "react-dom",
-  "react-dom/server",
-  "react-dom/server.node",
-  "react/jsx-runtime",
-  "react/jsx-dev-runtime",
-];
-
 const config = defineConfig({
   envDir: path.resolve(import.meta.dirname, "../.."),
   envPrefix: ["VITE_", "DASHBOARD_", "MANAGEMENT_", "CONTROL_PLANE_"],
@@ -32,14 +23,6 @@ const config = defineConfig({
     devtools(),
     nitro({
       preset: "bun",
-      rollupConfig: {
-        external: [/^@sentry\//, ...reactExternals],
-        output: {
-          paths: {
-            "react-dom/server": "react-dom/server.node",
-          },
-        },
-      },
       ...(managementApiUrl
         ? {
             routeRules: {

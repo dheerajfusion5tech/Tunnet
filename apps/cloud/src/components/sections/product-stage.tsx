@@ -57,7 +57,7 @@ const JOBS: Job[] = [
     id: "serve",
     label: "Internal apps",
     blurb: "HTTPS for Grafana, admin UIs, and APIs. No VPN client dance.",
-    title: "Expose a local port to the mesh with TLS from your org CA.",
+    title: "Expose a local port to the mesh with TLS from your org CA",
     highlight: "your org CA",
     points: [
       "One command: tunnet serve 3000",
@@ -81,7 +81,7 @@ const JOBS: Job[] = [
     id: "tunnel",
     label: "Public HTTPS",
     blurb: "Webhooks, demos, and customer URLs on edges you can run.",
-    title: "Give any local port a public URL. Keep the origin private.",
+    title: "Give any local port a public URL Keep the origin private",
     highlight: "public URL",
     points: [
       "tunnet tunnel 3000 returns HTTPS immediately",
@@ -105,7 +105,7 @@ const JOBS: Job[] = [
     id: "ssh",
     label: "Identity SSH",
     blurb: "ssh db-prod by name. No keys to copy, rotate, or leak.",
-    title: "SSH follows the person, not a file on disk.",
+    title: "SSH follows the person not a file on disk",
     highlight: "the person",
     points: [
       "tunnet ssh db-prod uses your Tunnet identity",
@@ -129,7 +129,7 @@ const JOBS: Job[] = [
     id: "policy",
     label: "One policy",
     blurb: "Mesh, serve, tunnel, and SSH share one ACL system.",
-    title: "Write policy once. It follows every connection.",
+    title: "Write policy once It follows every connection",
     highlight: "once",
     points: [
       "SSO and OIDC on the managed control plane",
@@ -248,8 +248,7 @@ export function ProductStage(): ReactNode {
       <div className="mx-auto mt-3 max-w-[1120px] overflow-hidden rounded-[28px] bg-[var(--l1-bg-2)] px-5 py-8 sm:px-8 sm:py-12 lg:px-12">
         <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.15fr)]">
           <div>
-            <p className="l1-label text-[var(--l1-muted-2)]">Product</p>
-            <h2 className="mt-3 max-w-[18ch] text-[clamp(1.85rem,3.4vw,2.75rem)] leading-[1.08] font-semibold tracking-[-0.04em] text-[var(--l1-fg)]">
+            <h2 className="max-w-[18ch] text-[clamp(1.85rem,3.4vw,2.75rem)] leading-[1.08] font-semibold tracking-[-0.04em] text-[var(--l1-fg)]">
               {renderTitleWithHighlight(job)}
             </h2>
             <ul className="mt-6 flex flex-col gap-2.5">
