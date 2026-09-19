@@ -293,7 +293,10 @@ pub async fn run_join(args: JoinArgs, state_dir: Option<&str>) -> anyhow::Result
             let (id, _, _) = load_agent(&paths, policy)?;
             (id, networks)
         }
-        None => (AgentIdentity::generate(), Vec::new()),
+        None => {
+            let (secrets, _) = tunnet_core::secret_store::load_or_create_secrets(&paths, policy)?;
+            (secrets.identity(), Vec::new())
+        }
     };
 
     let invite = decode_and_preflight(
