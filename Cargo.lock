@@ -10862,7 +10862,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-agent"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -10926,7 +10926,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-audit"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10946,7 +10946,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-cli"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "clap",
@@ -10970,7 +10970,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-client"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "bytes",
@@ -10987,7 +10987,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-common"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -11009,7 +11009,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-control"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "aes-gcm 0.11.1",
  "anyhow",
@@ -11061,7 +11061,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-core"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "aes-gcm 0.11.1",
  "anyhow",
@@ -11142,7 +11142,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-edge"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "argon2",
@@ -11181,7 +11181,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-kube-node"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "axum",
@@ -11203,7 +11203,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-license"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -11221,7 +11221,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-mobile"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "jni 0.21.1",
@@ -11242,7 +11242,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-node-napi"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "napi",
  "napi-build",
@@ -11255,7 +11255,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-operator"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "axum",
@@ -11289,7 +11289,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-policy-engine"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "blake3",
@@ -11306,7 +11306,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-policy-napi"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "napi",
  "napi-build",
@@ -11318,7 +11318,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-posture"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11350,7 +11350,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-relay"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "clap",
@@ -11369,7 +11369,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-service"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "libc",
@@ -11379,7 +11379,7 @@ dependencies = [
 
 [[package]]
 name = "tunnet-update"
-version = "0.9.1"
+version = "0.9.101"
 dependencies = [
  "anyhow",
  "hex",
