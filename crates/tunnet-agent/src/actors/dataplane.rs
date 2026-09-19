@@ -119,6 +119,9 @@ pub struct DataPlaneActor {
     outbound: Option<tokio::task::JoinHandle<()>>,
     generation_cancel: Option<tokio_util::sync::CancellationToken>,
     dns_task: Option<tokio::task::JoinHandle<()>>,
+    /// Interface index of the live TUN device (from `AsyncDevice::if_index`).
+    /// Used so route reconcile does not depend on netdev name matching (Windows).
+    tun_if_index: Option<u32>,
 }
 
 impl Actor for DataPlaneActor {
@@ -142,6 +145,7 @@ impl Actor for DataPlaneActor {
             outbound: None,
             generation_cancel: None,
             dns_task: None,
+            tun_if_index: None,
         };
         if auto_up {
             // Reconstruct service after (re)start from durable state.
@@ -183,7 +187,7 @@ impl DataPlaneActor {
     }
 
     fn desired_routes(&self) -> crate::system_routes::DesiredRoutes {
-        if self.cfg.is_direct {
+        let mut desired = if self.cfg.is_direct {
             let peer_ips: Vec<Ipv4Addr> = self.node.routes.peers().iter().map(|p| p.ip).collect();
             crate::system_routes::desired_direct(
                 &self.cfg.ifname,
@@ -208,7 +212,12 @@ impl DataPlaneActor {
                 has_exit,
                 &self.cfg.underlay_hosts,
             )
+        };
+
+        if let Some(idx) = self.tun_if_index {
+            desired.tun_if_index = Some(idx);
         }
+        desired
     }
 
     async fn reconcile_routes(&self) -> Result<(), DataPlaneError> {
@@ -254,6 +263,7 @@ impl DataPlaneActor {
         self.peer_dns_active.store(false, Ordering::SeqCst);
         self.up = false;
         self.status.set_up(false);
+        self.tun_if_index = None;
     }
 
     async fn do_bring_up(
@@ -302,6 +312,18 @@ impl DataPlaneActor {
             )
             .map_err(|e| DataPlaneError::Tun(format!("{e:#}")))?,
         );
+
+        // Authoritative index from the device itself (Windows Wintun + others).
+        // Avoids netdev name lookup, which can fail to match "tunnet0".
+        let tun_if_index = tun.if_index().ok();
+        if tun_if_index.is_none() {
+            tracing::warn!(
+                ifname = %self.cfg.ifname,
+                "TUN device has no if_index; route reconcile will fall back to name lookup"
+            );
+        }
+        self.tun_if_index = tun_if_index;
+
         crate::system_firewall::configure(&self.cfg.ifname);
 
         let generation = self.generation.wrapping_add(1);
