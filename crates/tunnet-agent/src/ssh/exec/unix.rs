@@ -206,9 +206,13 @@ pub fn drop_privileges(uid: u32, gid: u32, groups: &[u32]) -> anyhow::Result<()>
 }
 
 pub fn become_session() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    let tiocsctty = libc::c_ulong::from(libc::TIOCSCTTY);
+    #[cfg(not(target_os = "macos"))]
+    let tiocsctty = libc::TIOCSCTTY;
     unsafe {
         libc::setsid();
-        libc::ioctl(0, libc::TIOCSCTTY, 0);
+        libc::ioctl(0, tiocsctty, 0);
     }
     Ok(())
 }

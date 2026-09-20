@@ -104,19 +104,35 @@ mod unix {
         let Ok(c_user) = CString::new(username) else {
             return vec![gid];
         };
+        #[cfg(target_os = "macos")]
+        let Ok(base_gid) = libc::c_int::try_from(gid) else {
+            return vec![gid];
+        };
+        #[cfg(target_os = "macos")]
+        let mut groups: Vec<libc::c_int> = vec![0; 64];
+        #[cfg(not(target_os = "macos"))]
+        let base_gid = gid;
+        #[cfg(not(target_os = "macos"))]
+        let mut groups: Vec<libc::gid_t> = vec![0; 64];
         let mut n = 64i32;
-        let mut groups: Vec<libc::gid_t> = vec![0; n as usize];
         // SAFETY: getgrouplist fills `groups` up to `n`.
-        let rc = unsafe { libc::getgrouplist(c_user.as_ptr(), gid, groups.as_mut_ptr(), &mut n) };
+        let rc =
+            unsafe { libc::getgrouplist(c_user.as_ptr(), base_gid, groups.as_mut_ptr(), &mut n) };
         if rc < 0 {
             groups.resize(n.max(1) as usize, 0);
-            let rc =
-                unsafe { libc::getgrouplist(c_user.as_ptr(), gid, groups.as_mut_ptr(), &mut n) };
+            let rc = unsafe {
+                libc::getgrouplist(c_user.as_ptr(), base_gid, groups.as_mut_ptr(), &mut n)
+            };
             if rc < 0 {
                 return vec![gid];
             }
         }
         groups.truncate(n as usize);
+        #[cfg(target_os = "macos")]
+        let groups = groups
+            .into_iter()
+            .filter_map(|group| u32::try_from(group).ok())
+            .collect();
         let mut out = groups;
         if !out.contains(&gid) {
             out.insert(0, gid);
