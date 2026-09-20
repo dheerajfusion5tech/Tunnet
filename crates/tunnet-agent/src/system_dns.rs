@@ -45,9 +45,9 @@ pub const OWNER: &str = "io.tunnet.agent";
 ///
 /// This is intentionally not a wrapper around `osdns`: it contains only
 /// Tunnet-specific policy (PeerDNS IP, DNS suffix, target TUN name,
-/// split/full fallback choice). Everything below `osdns::DnsConfig` —
+/// split/full fallback choice). Everything below `osdns::DnsConfig` -
 /// validation, interface resolution, transactions, Enforce observation,
-/// reconciliation, restoration — is owned by `osdns`.
+/// reconciliation, restoration - is owned by `osdns`.
 pub struct DnsController {
     manager: DnsManager,
     state: parking_lot::Mutex<State>,
@@ -64,6 +64,8 @@ impl DnsController {
     /// Blocking; call via `spawn_blocking` from async code. Enforce needs no
     /// public watcher from Tunnet: osdns observes natively once a lease is
     /// active, and returns typed `Unsupported` where Enforce is unavailable.
+    /// Targets with no OS DNS backend (including Android) fail with
+    /// [`osdns::Error::UnsupportedPlatform`].
     pub fn create() -> osdns::Result<Arc<Self>> {
         Self::wrap(
             DnsManager::builder()
@@ -291,7 +293,7 @@ pub fn desired_config(
             .routing_domain(suffix);
         // Explicit default-route control is itself a capability
         // (NetworkManager-style backends expose routing domains without it).
-        // `None` means preserve/unspecified — never fake `false`.
+        // `None` means preserve/unspecified - never fake `false`.
         if caps.default_route {
             builder = builder.default_route(false);
         }
@@ -399,6 +401,9 @@ fn log_apply_failure(e: &osdns::Error) {
         osdns::Error::RequiresPrivilege(_) => {
             tracing::error!(error = %e, "PeerDNS OS configuration needs elevated privileges")
         }
+        osdns::Error::UnsupportedPlatform { .. } => {
+            tracing::error!(error = %e, "PeerDNS OS configuration is not available on this platform")
+        }
         osdns::Error::Unsupported { .. } => {
             tracing::error!(error = %e, "PeerDNS OS configuration unsupported on this backend")
         }
@@ -431,6 +436,13 @@ mod tests {
 
     fn selector() -> InterfaceSelector {
         InterfaceSelector::Name(OsString::from("tunnet0"))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn create_fails_on_unsupported_platform() {
+        let err = DnsController::create().unwrap_err();
+        assert!(matches!(err, osdns::Error::UnsupportedPlatform { .. }));
     }
 
     #[test]
@@ -1173,7 +1185,18 @@ mod tests {
 
         #[test]
         fn reincarnated_resource_fails_closed_without_rebinding() {
-            let (manager, fake, _dir) = enforce_manager(full_caps());
+            // Cooperative: Enforce would race the journal on ResourceRemoved
+            // while this lease is still live (Windows ERROR_ACCESS_DENIED).
+            let dir = tempfile::tempdir().unwrap();
+            let fake = FakeDns::with_capabilities(full_caps());
+            let manager = manager_for_testing_with_policy(
+                "io.tunnet.agent",
+                dir.path(),
+                &fake,
+                Duration::from_secs(5),
+                ConflictPolicy::Cooperative,
+            )
+            .unwrap();
             let dns = DnsController::wrap(manager).unwrap();
             dns.apply("eth0", MAGIC_IP, "tunnet").unwrap();
 

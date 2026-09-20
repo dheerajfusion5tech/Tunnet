@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::actors::dataplane::PublishedPlane;
 use crate::metrics::AgentMetrics;
 use crate::qos::{self, OutboundScheduler};
+#[cfg(feature = "ssh")]
 use crate::ssh_nat;
 
 /// Ask the app's `VpnService` to establish a tunnel, then adopt its descriptor.
@@ -40,21 +41,25 @@ pub fn build_tun_multi(
 ) -> anyhow::Result<AsyncDevice> {
     use std::os::fd::AsRawFd;
 
-    use crate::android_tun::{self, TunRequest};
+    use crate::platform::tun::{self, TunRequest};
 
     anyhow::ensure!(!addrs.is_empty(), "at least one local address required");
     anyhow::ensure!(
         !routes.is_empty(),
         "at least one route required: without one the tunnel captures nothing"
     );
+    anyhow::ensure!(
+        (576..=9000).contains(&mtu),
+        "mtu {mtu} is outside 576..=9000"
+    );
 
-    let fd = android_tun::establish(TunRequest {
+    let fd = tun::establish(TunRequest {
         addrs: addrs.to_vec(),
-        routes: routes.to_vec(),
-        // PeerDNS binds host loopback, which Android cannot use as a tunnel
-        // resolver. Left empty deliberately; see TunRequest::dns.
-        dns: Vec::new(),
+        routes: android_vpn_capture_routes(routes),
+        dns: vec![tunnet_common::VirtualResolverEndpoint::IP],
         mtu,
+        allow_ipv6_passthrough: true,
+        inherit_underlying_metered: true,
     })?;
     // SAFETY: the descriptor is owned (detachFd on the JVM side) and valid;
     // Borrow for the call and only give up ownership once it succeeded: on
@@ -71,6 +76,24 @@ pub fn build_tun_multi(
     };
     tracing::debug!(ifname, "TUN device adopted");
     Ok(dev)
+}
+
+/// Split-tunnel destinations for Android `VpnService`: overlay peer CIDRs
+/// plus the in-TUN resolver host route. Default routes are dropped so iroh
+/// relay/direct underlay stays on the OS table (no `VpnService.protect`).
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn android_vpn_capture_routes(peer_cidrs: &[ipnet::Ipv4Net]) -> Vec<ipnet::Ipv4Net> {
+    let dns = tunnet_common::VirtualResolverEndpoint::IP;
+    let host = tunnet_common::VirtualResolverEndpoint::host_route();
+    let mut out: Vec<_> = peer_cidrs
+        .iter()
+        .copied()
+        .filter(|net| net.prefix_len() != 0)
+        .collect();
+    if !out.iter().any(|r| r.contains(&dns)) {
+        out.push(host);
+    }
+    out
 }
 
 /// `routes` is unused here: desktop platforms install peer routes into the
@@ -115,6 +138,7 @@ pub struct OutboundDeps {
     pub firewalls: HashMap<Uuid, FirewallEngine>,
     pub metrics: AgentMetrics,
     pub mtu: u16,
+    pub in_tun_dns: Option<std::sync::Arc<tunnet_core::dns::InTun>>,
 }
 
 fn drop_parse(metrics: &AgentMetrics, err: packet::ParseError) {
@@ -142,6 +166,7 @@ pub async fn run_outbound(deps: OutboundDeps) -> anyhow::Result<()> {
         firewalls,
         metrics,
         mtu,
+        in_tun_dns,
     } = deps;
 
     let scheduler = OutboundScheduler::new(pool.clone(), metrics.clone(), mtu);
@@ -154,6 +179,7 @@ pub async fn run_outbound(deps: OutboundDeps) -> anyhow::Result<()> {
             continue;
         }
         let self_ip = acl.self_id.load().ip;
+        #[cfg(feature = "ssh")]
         let _ = ssh_nat::rewrite_outbound(&mut buf[..n], self_ip);
         let packet = &buf[..n];
         let pkt = match packet::parse(packet) {
@@ -166,6 +192,21 @@ pub async fn run_outbound(deps: OutboundDeps) -> anyhow::Result<()> {
         let Some(pkt) = require_ipv4(&metrics, pkt, false) else {
             continue;
         };
+
+        if let Some(dns) = &in_tun_dns
+            && tunnet_core::dns::targets_virtual_resolver(&pkt)
+        {
+            let dns = dns.clone();
+            let tun = tun.clone();
+            let raw = packet.to_vec();
+            tokio::spawn(async move {
+                for reply in dns.handle(&raw).await {
+                    let _ = tun.send(&reply).await;
+                }
+            });
+            continue;
+        }
+
         let dst = pkt.ip.v4_dst().unwrap();
 
         if routes.is_advertised_destination(&dst) {
@@ -365,6 +406,7 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
             }
 
             let n = dg.len() as u64;
+            #[cfg(feature = "ssh")]
             let self_ip = acl.self_id.load().ip;
             // Generation already verified: device + token belong to the
             // generation loaded at reader start. Recheck cancellation
@@ -372,6 +414,7 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
             if generation_cancel.is_cancelled() {
                 break;
             }
+            #[cfg(feature = "ssh")]
             let send_result = if ssh_nat::needs_inbound_rewrite(&dg, self_ip) {
                 let mut packet = dg.to_vec();
                 let _ = ssh_nat::rewrite_inbound(&mut packet, self_ip);
@@ -379,6 +422,8 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
             } else {
                 device.send(dg.as_ref()).await
             };
+            #[cfg(not(feature = "ssh"))]
+            let send_result = device.send(dg.as_ref()).await;
             if let Err(e) = send_result {
                 tracing::warn!(?e, "tun send failed");
                 metrics.dropped_inc("tun_send_failed");
@@ -393,4 +438,40 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
     }
     metrics.active_conns_dec();
     tracing::info!(%remote_id, "peer disconnected");
+}
+
+#[cfg(test)]
+mod android_vpn_route_tests {
+    use super::android_vpn_capture_routes;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn capture_routes_are_overlay_plus_virtual_dns_not_default() {
+        let overlay: ipnet::Ipv4Net = "10.38.0.0/16".parse().unwrap();
+        let routes = android_vpn_capture_routes(&[overlay]);
+        assert!(routes.contains(&overlay));
+        assert!(routes.contains(&tunnet_common::VirtualResolverEndpoint::host_route()));
+        assert!(
+            routes.iter().all(|r| r.prefix_len() != 0),
+            "default route would swallow iroh underlay"
+        );
+        let public = Ipv4Addr::new(1, 1, 1, 1);
+        let lan = Ipv4Addr::new(192, 168, 1, 20);
+        assert!(!routes.iter().any(|r| r.contains(&public)));
+        assert!(!routes.iter().any(|r| r.contains(&lan)));
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.contains(&tunnet_common::VirtualResolverEndpoint::IP))
+        );
+    }
+
+    #[test]
+    fn default_peer_cidr_is_stripped() {
+        let default: ipnet::Ipv4Net = "0.0.0.0/0".parse().unwrap();
+        let overlay: ipnet::Ipv4Net = "10.9.0.0/16".parse().unwrap();
+        let routes = android_vpn_capture_routes(&[default, overlay]);
+        assert!(!routes.iter().any(|r| r.prefix_len() == 0));
+        assert!(routes.contains(&overlay));
+    }
 }
