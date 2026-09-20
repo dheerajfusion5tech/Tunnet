@@ -7,7 +7,6 @@
 //!
 //! Restrict further with local ACL rules (`tunnet firewall`).
 
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +19,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tunnet_common::packet::{FragmentTable, Packet, ResolvedL4, TcpFlags, synthesize_reject};
-use tunnet_common::policy::{Action, PolicyBundle, PolicyRule, PortRange, Protocol, Selector};
+use tunnet_common::policy::{PortRange, Protocol};
 use uuid::Uuid;
 
 use crate::state::StatePaths;
@@ -394,36 +393,6 @@ impl FirewallEngine {
         self.inner.suggested_rules.load().as_ref().clone()
     }
 
-    /// Ensure inbound TCP to `port` is allowed (e.g. SSH external port 22).
-    /// Merges into local rules in-memory without persisting to disk.
-    pub fn ensure_inbound_tcp_allow(&self, port: u16) {
-        let mut rules = self.local_rules_snapshot();
-        let already = rules.iter().any(|r| {
-            r.direction == FirewallDirection::In
-                && r.action == FirewallAction::Allow
-                && r.protocol == Protocol::Tcp
-                && (r.ports.is_empty() || r.ports.iter().any(|p| p.start <= port && port <= p.end))
-                && matches!(r.peer, PeerFilter::Any)
-        });
-        if already {
-            return;
-        }
-        rules.push(FirewallRule {
-            direction: FirewallDirection::In,
-            action: FirewallAction::Allow,
-            protocol: Protocol::Tcp,
-            ports: vec![PortRange {
-                start: port,
-                end: port,
-            }],
-            peer: PeerFilter::Any,
-        });
-        let version = self.inner.version.fetch_add(1, Ordering::Relaxed) + 1;
-        self.inner.local_rules.store(Arc::new(rules));
-        self.inner.version.store(version, Ordering::Relaxed);
-        tracing::info!(port, "firewall: ensured inbound TCP allow for SSH");
-    }
-
     /// Evaluate a packet. `peer_endpoint_hex` is the remote mesh peer (if known).
     /// `network_id` is the peer's Direct network (for `PeerFilter::NetworkId`).
     pub fn evaluate(
@@ -715,115 +684,6 @@ fn is_expired(st: &FlowState, now: Instant) -> bool {
         FlowPhase::Icmp => ICMP_TTL,
     };
     now.duration_since(st.last_seen) > ttl
-}
-
-pub fn firewall_to_policy(
-    cfg: &FirewallConfig,
-    self_endpoint_hex: &str,
-    self_ip: Ipv4Addr,
-) -> PolicyBundle {
-    let _ = self_ip;
-    if !cfg.enabled {
-        return PolicyBundle {
-            rules: vec![PolicyRule {
-                src: Selector::Any,
-                dst: Selector::Any,
-                action: Action::Allow,
-                ports: vec![],
-                protocol: Some(Protocol::Any),
-                priority: 0,
-                order_index: 0,
-                scope: tunnet_common::policy::RuleScope::Network,
-                enabled: true,
-                slug: None,
-                src_posture: vec![],
-            }],
-            ssh_rules: vec![],
-            version: cfg.version,
-            signature: String::new(),
-            default_action: tunnet_common::policy::DefaultAction::Allow,
-            icmp_policy: tunnet_common::policy::IcmpPolicy::Allow,
-            postures: HashMap::new(),
-            default_src_posture: vec![],
-            posture_enforcement: None,
-        };
-    }
-
-    let mut rules = Vec::new();
-    let mut priority = 1000i32;
-    for fr in &cfg.rules {
-        // Reject maps to Deny at connection level (no RST on QUIC accept)
-        let action = match fr.action {
-            FirewallAction::Allow => Action::Allow,
-            FirewallAction::Deny | FirewallAction::Reject => Action::Deny,
-        };
-        let peer_sel = match &fr.peer {
-            PeerFilter::Any | PeerFilter::NetworkId(_) | PeerFilter::Hostname(_) => Selector::Any,
-            PeerFilter::Endpoint(e) => Selector::Endpoint(e.clone()),
-        };
-        let (src, dst) = match fr.direction {
-            FirewallDirection::In => (peer_sel, Selector::Endpoint(self_endpoint_hex.to_string())),
-            FirewallDirection::Out => (Selector::Endpoint(self_endpoint_hex.to_string()), peer_sel),
-        };
-        rules.push(PolicyRule {
-            src,
-            dst,
-            action,
-            ports: fr.ports.clone(),
-            protocol: Some(fr.protocol),
-            priority,
-            order_index: 1000 - priority,
-            scope: tunnet_common::policy::RuleScope::Network,
-            enabled: true,
-            slug: None,
-            src_posture: vec![],
-        });
-        priority -= 1;
-    }
-
-    // Default: allow outbound any, allow inbound ICMP (via missing deny for icmp only is hard);
-    // connection-level: allow any peer that is in AuthCache is separate. Peer-level allow
-    // for established mesh: allow any → self at low priority for membership peers handled by hook.
-    rules.push(PolicyRule {
-        src: Selector::Endpoint(self_endpoint_hex.to_string()),
-        dst: Selector::Any,
-        action: Action::Allow,
-        ports: vec![],
-        protocol: Some(Protocol::Any),
-        priority: -100,
-        order_index: 10_000,
-        scope: tunnet_common::policy::RuleScope::Network,
-        enabled: true,
-        slug: None,
-        src_posture: vec![],
-    });
-    // Inbound: allow any (packet path enforces via FirewallEngine); connection accept
-    // still gated by AuthCache in DirectAuthHook.
-    rules.push(PolicyRule {
-        src: Selector::Any,
-        dst: Selector::Endpoint(self_endpoint_hex.to_string()),
-        action: Action::Allow,
-        ports: vec![],
-        protocol: Some(Protocol::Any),
-        priority: -200,
-        order_index: 10_001,
-        scope: tunnet_common::policy::RuleScope::Network,
-        enabled: true,
-        slug: None,
-        src_posture: vec![],
-    });
-
-    PolicyBundle {
-        rules,
-        ssh_rules: vec![],
-        version: cfg.version,
-        signature: String::new(),
-        default_action: tunnet_common::policy::DefaultAction::Allow,
-        icmp_policy: tunnet_common::policy::IcmpPolicy::Allow,
-        postures: HashMap::new(),
-        default_src_posture: vec![],
-        posture_enforcement: None,
-    }
 }
 
 #[cfg(test)]

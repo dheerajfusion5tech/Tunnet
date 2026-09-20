@@ -1,7 +1,6 @@
 //! Gossip presence beacons with TTL and endpoint identity signatures.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,8 +25,6 @@ pub struct PresenceBeacon {
     pub hostname: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_ip: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh_host_key: Option<String>,
     pub agent_version: String,
     #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
     pub issued_at: Timestamp,
@@ -89,11 +86,8 @@ pub struct PresenceConfig {
     pub self_endpoint_id: String,
     pub hostname: String,
     pub mesh_ip: Option<String>,
-    pub ssh_host_key: Option<String>,
     pub agent_version: String,
     pub bootstrap: Vec<EndpointId>,
-    pub known_hosts_file: Option<PathBuf>,
-    pub dns_suffix: Option<String>,
 }
 
 pub struct PresenceHandle {
@@ -121,7 +115,6 @@ struct BeaconSignPayload<'a> {
     endpoint_id: &'a str,
     hostname: &'a str,
     mesh_ip: Option<&'a str>,
-    ssh_host_key: Option<&'a str>,
     agent_version: &'a str,
     #[serde(with = "jiff::fmt::serde::timestamp::second::required")]
     issued_at: Timestamp,
@@ -135,7 +128,6 @@ fn beacon_sign_payload(beacon: &PresenceBeacon) -> anyhow::Result<Vec<u8>> {
         endpoint_id: &beacon.endpoint_id,
         hostname: &beacon.hostname,
         mesh_ip: beacon.mesh_ip.as_deref(),
-        ssh_host_key: beacon.ssh_host_key.as_deref(),
         agent_version: &beacon.agent_version,
         issued_at: beacon.issued_at,
         expires_at: beacon.expires_at,
@@ -165,7 +157,6 @@ pub fn build_beacon(
     signing_key: &SigningKey,
     hostname: &str,
     mesh_ip: Option<String>,
-    ssh_host_key: Option<String>,
     agent_version: &str,
     now: Timestamp,
 ) -> anyhow::Result<PresenceBeacon> {
@@ -175,7 +166,6 @@ pub fn build_beacon(
         endpoint_id,
         hostname: hostname.to_string(),
         mesh_ip,
-        ssh_host_key,
         agent_version: agent_version.to_string(),
         issued_at: now,
         expires_at: now + PRESENCE_TTL,
@@ -197,8 +187,6 @@ pub async fn spawn_presence(cfg: PresenceConfig) -> anyhow::Result<PresenceHandl
     let (sender, mut receiver) = cfg.gossip.subscribe(topic, cfg.bootstrap).await?.split();
 
     let recv_table = table.clone();
-    let recv_known_hosts = cfg.known_hosts_file.clone();
-    let recv_suffix = cfg.dns_suffix.clone();
     tokio::spawn(async move {
         while let Some(ev) = receiver.next().await {
             match ev {
@@ -217,21 +205,6 @@ pub async fn spawn_presence(cfg: PresenceConfig) -> anyhow::Result<PresenceHandl
                         "gossip presence"
                     );
                     recv_table.upsert(beacon.clone());
-                    if let (Some(file), Some(suffix)) =
-                        (recv_known_hosts.as_ref(), recv_suffix.as_deref())
-                        && let Some(key) = beacon.ssh_host_key.as_deref().filter(|k| !k.is_empty())
-                    {
-                        let fqdn = format!("{}.{}", beacon.hostname, suffix);
-                        let mut hosts = vec![beacon.hostname.as_str(), fqdn.as_str()];
-                        if let Some(ip) = beacon.mesh_ip.as_deref() {
-                            hosts.insert(0, ip);
-                        }
-                        if let Err(e) =
-                            crate::known_hosts::upsert_known_hosts_entry(file, &hosts, key)
-                        {
-                            tracing::debug!(?e, "presence known_hosts upsert skipped");
-                        }
-                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -247,7 +220,6 @@ pub async fn spawn_presence(cfg: PresenceConfig) -> anyhow::Result<PresenceHandl
     let self_endpoint_id = cfg.self_endpoint_id;
     let hostname = cfg.hostname;
     let mesh_ip = cfg.mesh_ip;
-    let ssh_host_key = cfg.ssh_host_key;
     let agent_version = cfg.agent_version;
     let network_id = cfg.network_id;
     let _gossip = cfg.gossip;
@@ -262,7 +234,6 @@ pub async fn spawn_presence(cfg: PresenceConfig) -> anyhow::Result<PresenceHandl
                 &signing_key,
                 &hostname,
                 mesh_ip.clone(),
-                ssh_host_key.clone(),
                 &agent_version,
                 now,
             ) else {
@@ -299,7 +270,6 @@ mod tests {
             &sk,
             "host-a",
             Some("10.21.0.2".into()),
-            None,
             "0.1.0",
             now,
         )
@@ -311,7 +281,7 @@ mod tests {
     fn presence_expiry_rejected() {
         let sk = sample_key();
         let now = Timestamp::from_second(1_700_000_000).unwrap();
-        let beacon = build_beacon(Uuid::new_v4(), &sk, "host-a", None, None, "0.1.0", now).unwrap();
+        let beacon = build_beacon(Uuid::new_v4(), &sk, "host-a", None, "0.1.0", now).unwrap();
         assert!(verify_beacon(&beacon, now + PRESENCE_TTL + SignedDuration::from_secs(1)).is_err());
     }
 }

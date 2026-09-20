@@ -160,7 +160,7 @@ etherparse = "0.21"
 route_manager = { version = "0.2.13", features = ["async"] }
 portable-pty = "0.9"
 russh = { version = "0.63", default-features = false, features = ["ring"] }
-russh-sftp = "2.4"
+russh-sftp = "3.0"
 async-trait = "0.1"
 regex = "1"
 semver = "1"

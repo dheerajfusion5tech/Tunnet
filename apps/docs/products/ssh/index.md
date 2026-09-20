@@ -29,6 +29,12 @@ SSH traffic travels over the Tunnet mesh like any other TCP service. Peers authe
 
 Sessions and recordings appear in the dashboard under **SSH**.
 
+## Direct Mode authorization
+
+Direct Mode authorizes SSH separately from the packet firewall. A connection is accepted only when the source endpoint is a current member of the same Direct network as the destination address, and the requested account is the local account running the agent. Removing a member immediately removes both its transport access and its trusted SSH metadata. Managed Mode continues to use centrally configured SSH policy rules.
+
+Allowing TCP port 22 in a Direct firewall rule controls reachability only; it does not grant a different OS identity access to a shell.
+
 ## Using stock OpenSSH
 
 After the agent is up and PeerDNS resolves mesh names, stock clients work against `hostname.tunnet`:

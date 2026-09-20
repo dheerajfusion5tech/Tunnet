@@ -38,7 +38,6 @@ pub struct SignedMemberRecord {
     pub ipv4: Ipv4Addr,
     pub tags: Vec<String>,
     pub status: String,
-    pub ssh_host_key: Option<String>,
     pub sequence: u64,
     pub joined_at: Timestamp,
     pub grant: NetworkGrant,
@@ -46,7 +45,8 @@ pub struct SignedMemberRecord {
     pub coordinator: bool,
 }
 
-pub const MEMBER_SCHEMA_VERSION: u16 = 2;
+pub const MEMBER_SCHEMA_VERSION: u16 = 3;
+pub const MEMBER_METADATA_SCHEMA_VERSION: u16 = 1;
 pub const GENESIS_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,7 +177,6 @@ struct MemberRecordSignPayload<'a> {
     ipv4: Ipv4Addr,
     tags: &'a [String],
     status: &'a str,
-    ssh_host_key: &'a Option<String>,
     sequence: u64,
     joined_at: Timestamp,
     grant: &'a NetworkGrant,
@@ -193,12 +192,66 @@ fn member_record_sign_payload(record: &SignedMemberRecord) -> anyhow::Result<Vec
         ipv4: record.ipv4,
         tags: &record.tags,
         status: &record.status,
-        ssh_host_key: &record.ssh_host_key,
         sequence: record.sequence,
         joined_at: record.joined_at,
         grant: &record.grant,
         coordinator: record.coordinator,
     })?)
+}
+
+/// Device-owned mutable data. Membership remains coordinator-owned; this
+/// record is signed by the endpoint key named by `endpoint_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignedMemberMetadata {
+    pub schema_version: u16,
+    pub network_id: Uuid,
+    pub endpoint_id: String,
+    pub ssh_host_key: String,
+    pub sequence: u64,
+    pub sig: String,
+}
+
+#[derive(Serialize)]
+struct MemberMetadataSignPayload<'a> {
+    schema_version: u16,
+    network_id: Uuid,
+    endpoint_id: &'a str,
+    ssh_host_key: &'a str,
+    sequence: u64,
+}
+
+fn member_metadata_sign_payload(record: &SignedMemberMetadata) -> anyhow::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&MemberMetadataSignPayload {
+        schema_version: record.schema_version,
+        network_id: record.network_id,
+        endpoint_id: &record.endpoint_id,
+        ssh_host_key: &record.ssh_host_key,
+        sequence: record.sequence,
+    })?)
+}
+
+pub fn sign_member_metadata(
+    endpoint_key: &SigningKey,
+    mut record: SignedMemberMetadata,
+) -> anyhow::Result<SignedMemberMetadata> {
+    let expected = hex::encode(endpoint_key.verifying_key().to_bytes());
+    anyhow::ensure!(
+        record.endpoint_id == expected,
+        "metadata endpoint does not match signing key"
+    );
+    record.sig = sign_bytes(endpoint_key, &member_metadata_sign_payload(&record)?);
+    Ok(record)
+}
+
+pub fn verify_member_metadata(record: &SignedMemberMetadata) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.schema_version == MEMBER_METADATA_SCHEMA_VERSION,
+        "unsupported member metadata schema {}",
+        record.schema_version
+    );
+    anyhow::ensure!(!record.ssh_host_key.trim().is_empty(), "empty SSH host key");
+    let vk = verifying_key_from_hex(&record.endpoint_id)?;
+    verify_sig(&vk, &member_metadata_sign_payload(record)?, &record.sig)
 }
 
 /// Coordinator attestation over the member record (including embedded grant).
@@ -486,7 +539,6 @@ mod tests {
             ipv4: "10.21.0.7".parse().unwrap(),
             tags: vec!["tag".into()],
             status: "active".into(),
-            ssh_host_key: None,
             sequence: 1,
             joined_at: Timestamp::now(),
             grant,
@@ -516,7 +568,6 @@ mod tests {
                 ipv4: "10.21.0.8".parse().unwrap(),
                 tags: vec![],
                 status: "active".into(),
-                ssh_host_key: None,
                 sequence: 1,
                 joined_at: Timestamp::now(),
                 grant,
@@ -550,7 +601,6 @@ mod tests {
             ipv4: "10.21.0.8".parse().unwrap(),
             tags: vec![],
             status: "active".into(),
-            ssh_host_key: None,
             sequence: 1,
             joined_at: Timestamp::now(),
             grant,
@@ -580,7 +630,6 @@ mod tests {
             ipv4: "10.21.0.9".parse().unwrap(),
             tags: vec![],
             status: "active".into(),
-            ssh_host_key: None,
             sequence: 1,
             joined_at: Timestamp::now(),
             grant,
@@ -672,7 +721,6 @@ mod tests {
             ipv4: "192.168.1.5".parse().unwrap(),
             tags: vec![],
             status: "active".into(),
-            ssh_host_key: None,
             sequence: 1,
             joined_at: Timestamp::now(),
             grant: sample_grant(genesis.network_id, &"aa".repeat(32), MemberRole::Member),
@@ -704,6 +752,34 @@ mod tests {
         };
         let signed = sign_revocation(&sk, revocation).unwrap();
         verify_revocation(&vk, &signed).unwrap();
+    }
+
+    #[test]
+    fn member_metadata_is_endpoint_signed_and_network_bound() {
+        let endpoint_key = SigningKey::generate(&mut rand::rng());
+        let endpoint_id = hex::encode(endpoint_key.verifying_key().to_bytes());
+        let network_id = Uuid::new_v4();
+        let signed = sign_member_metadata(
+            &endpoint_key,
+            SignedMemberMetadata {
+                schema_version: MEMBER_METADATA_SCHEMA_VERSION,
+                network_id,
+                endpoint_id,
+                ssh_host_key: "ssh-ed25519 AAAAdevice".into(),
+                sequence: 1,
+                sig: String::new(),
+            },
+        )
+        .unwrap();
+        verify_member_metadata(&signed).unwrap();
+
+        let mut moved = signed.clone();
+        moved.network_id = Uuid::new_v4();
+        assert!(verify_member_metadata(&moved).is_err());
+
+        let mut rotated_without_signature = signed;
+        rotated_without_signature.ssh_host_key = "ssh-ed25519 AAAAattacker".into();
+        assert!(verify_member_metadata(&rotated_without_signature).is_err());
     }
 
     #[test]

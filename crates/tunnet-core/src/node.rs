@@ -26,9 +26,9 @@ use crate::direct::PresenceTable;
 #[cfg(feature = "direct")]
 use crate::direct::{
     AUTH_ALPN, AuthCache, CONNECT_ALPN, DirectAuthHook, DirectAuthority, DocsBootstrap,
-    DocsMembership, JOIN_ALPN, MembershipEntry, NetworkGrant, firewall_to_policy,
-    signing_key_from_hex, spawn_discovery, spawn_seed_auth, validate_member_against_genesis,
-    verify_genesis, verify_member_record, verifying_key_from_hex,
+    DocsMembership, JOIN_ALPN, MembershipEntry, NetworkGrant, signing_key_from_hex,
+    spawn_discovery, spawn_seed_auth, validate_member_against_genesis, verify_genesis,
+    verify_member_record, verifying_key_from_hex,
 };
 #[cfg(any(feature = "managed", feature = "direct"))]
 use crate::direct::{
@@ -570,8 +570,7 @@ impl CoreNode {
         #[cfg(feature = "managed")]
         let revisions = Arc::new(crate::sync::ManagedRevisions::new(0, 0));
         // ACL/self identity uses primary network name; per-network policy applied via docs.
-        let fw0 = crate::agent_config::load_firewall_for(&paths, &primary.network_name);
-        let policy0 = firewall_to_policy(&fw0, &my_id_hex, self_ipv4);
+        let policy0 = tunnet_common::policy::PolicyBundle::default();
         let acl = AclEngine::new(
             SelfIdentity {
                 endpoint_hex: my_id_hex.clone(),
@@ -681,6 +680,7 @@ impl CoreNode {
                     acl: &acl,
                     auth: &auth,
                     endpoint: &endpoint,
+                    endpoint_signing_key: &identity.signing_key,
                 },
                 &mut direct,
             )
@@ -847,6 +847,7 @@ struct BootstrapOneArgs<'a> {
     acl: &'a AclEngine,
     auth: &'a AuthCache,
     endpoint: &'a Endpoint,
+    endpoint_signing_key: &'a ed25519_dalek::SigningKey,
 }
 
 #[cfg(feature = "direct")]
@@ -868,7 +869,7 @@ async fn bootstrap_one_direct_network(
     validate_member_against_genesis(&direct.genesis, &direct.self_record)?;
 
     let fw_cfg = crate::agent_config::load_firewall_for(args.paths, &direct.network_name);
-    let policy = firewall_to_policy(&fw_cfg, args.my_id_hex, net_ipv4);
+    let policy = tunnet_common::policy::PolicyBundle::default();
     let firewall =
         crate::direct::FirewallEngine::from_config(&fw_cfg, net_ipv4, args.my_id_hex.to_string());
     let spoof_tracker = crate::direct::SpoofTracker::new();
@@ -881,7 +882,7 @@ async fn bootstrap_one_direct_network(
         joined_at: direct.self_record.joined_at,
         coordinator: direct.coordinator,
         status: "active".into(),
-        ssh_host_key: direct.self_record.ssh_host_key.clone(),
+        ssh_host_key: None,
     };
 
     let coordinator_signing_key = direct
@@ -943,6 +944,7 @@ async fn bootstrap_one_direct_network(
         self_endpoint_id: args.my_id_hex,
         self_entry,
         coordinator_signing_key,
+        endpoint_signing_key: args.endpoint_signing_key.clone(),
         coordinator_verifying_key,
         content_key: content_key.clone(),
         network_grant: network_grant.clone(),

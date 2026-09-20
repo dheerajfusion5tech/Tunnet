@@ -243,7 +243,6 @@ pub async fn persist_direct_create(
             ipv4: self_ip,
             tags: vec![],
             status: "active".into(),
-            ssh_host_key: None,
             sequence: 1,
             joined_at: created_at,
             grant: self_grant.clone(),

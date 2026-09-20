@@ -62,14 +62,16 @@ pub use contact::{contact_id_from_endpoint, contact_id_from_hex, is_contact_id, 
 pub use discovery::{DiscoveryHandle, spawn_discovery, spawn_seed_auth, topic_from_name_secret};
 pub use firewall::{
     EvalResult, FirewallConfig, FirewallEngine, FirewallRule, FirewallStats, PacketDirection,
-    default_firewall, firewall_to_policy,
+    default_firewall,
 };
 pub use grants::{
-    EpochRecord, GENESIS_SCHEMA_VERSION, Genesis, MEMBER_SCHEMA_VERSION, MemberRole, NetworkGrant,
-    Revocation, SignedMemberRecord, decrypt_content, encrypt_content, generate_coordinator_keypair,
-    grant_expiry, sign_epoch, sign_genesis, sign_grant, sign_member_record, sign_revocation,
-    signing_key_from_hex, validate_member_against_genesis, validate_membership_set, verify_epoch,
-    verify_genesis, verify_grant, verify_member_record, verify_revocation, verifying_key_from_hex,
+    EpochRecord, GENESIS_SCHEMA_VERSION, Genesis, MEMBER_METADATA_SCHEMA_VERSION,
+    MEMBER_SCHEMA_VERSION, MemberRole, NetworkGrant, Revocation, SignedMemberMetadata,
+    SignedMemberRecord, decrypt_content, encrypt_content, generate_coordinator_keypair,
+    grant_expiry, sign_epoch, sign_genesis, sign_grant, sign_member_metadata, sign_member_record,
+    sign_revocation, signing_key_from_hex, validate_member_against_genesis,
+    validate_membership_set, verify_epoch, verify_genesis, verify_grant, verify_member_metadata,
+    verify_member_record, verify_revocation, verifying_key_from_hex,
 };
 #[cfg(feature = "direct")]
 pub use invite::{

@@ -38,6 +38,19 @@ pub struct SshServeDeps {
     pub signed: Option<SignedClient>,
     pub hostname: String,
     pub network_name: String,
+    pub authorization: SshAuthorization,
+}
+
+#[derive(Clone)]
+pub enum SshAuthorization {
+    Managed,
+    /// Direct SSH is an endpoint-authenticated service: the source must be a
+    /// current member of the same network as the destination address, and may
+    /// request only the account running the agent.
+    Direct {
+        local_network: uuid::Uuid,
+        local_user: String,
+    },
 }
 
 pub struct SshHandler {
@@ -45,6 +58,7 @@ pub struct SshHandler {
     peer_addr: SocketAddr,
     peer_hex: String,
     peer_hostname: Option<String>,
+    local_addr: SocketAddr,
     username: String,
     auth_ok: bool,
     pending_reauth_url: Option<String>,
@@ -60,7 +74,7 @@ pub struct SshHandler {
 }
 
 impl SshHandler {
-    pub fn new(deps: SshServeDeps, peer_addr: SocketAddr) -> Self {
+    pub fn new(deps: SshServeDeps, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self {
         let ip = match peer_addr.ip() {
             std::net::IpAddr::V4(ip) => ip,
             std::net::IpAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
@@ -81,6 +95,7 @@ impl SshHandler {
             peer_addr,
             peer_hex,
             peer_hostname,
+            local_addr,
             username: String::new(),
             auth_ok: false,
             pending_reauth_url: None,
@@ -114,6 +129,34 @@ impl SshHandler {
     }
 
     fn evaluate_policy(&mut self, user: &str) -> Option<SshPolicyRule> {
+        if let SshAuthorization::Direct {
+            local_network,
+            local_user,
+        } = &self.deps.authorization
+        {
+            let source = self
+                .deps
+                .routes
+                .lookup_endpoint_in(*local_network, &self.peer_hex)?;
+            match self.local_addr.ip() {
+                std::net::IpAddr::V4(_) => {}
+                std::net::IpAddr::V6(_) => return None,
+            }
+            if !direct_ssh_authorized(source.network_id, *local_network, user, local_user) {
+                return None;
+            }
+            return Some(SshPolicyRule {
+                src: tunnet_common::policy::Selector::Endpoint(source.endpoint_hex.clone()),
+                dst: tunnet_common::policy::Selector::Any,
+                action: SshAction::Accept,
+                users: vec![local_user.clone()],
+                record: false,
+                recorder: None,
+                enforce_recorder: false,
+                check_period_secs: None,
+                priority: 0,
+            });
+        }
         let empty: Vec<String> = Vec::new();
         let self_id = self.deps.acl.self_id.load();
         let peer_info = self.deps.routes.lookup_endpoint(&self.peer_hex);
@@ -434,6 +477,17 @@ impl SshHandler {
     }
 }
 
+fn direct_ssh_authorized(
+    source_network: uuid::Uuid,
+    target_network: uuid::Uuid,
+    requested_user: &str,
+    local_user: &str,
+) -> bool {
+    source_network == target_network
+        && !local_user.is_empty()
+        && requested_user.eq_ignore_ascii_case(local_user)
+}
+
 impl Handler for SshHandler {
     type Error = russh::Error;
 
@@ -448,7 +502,16 @@ impl Handler for SshHandler {
         self.decision = decision.clone();
         match decision {
             None => {
-                tracing::info!(peer = %self.peer_hex, %user, "ssh denied (no matching rule)");
+                if matches!(self.deps.authorization, SshAuthorization::Direct { .. }) {
+                    tracing::info!(
+                        peer = %self.peer_hex,
+                        %user,
+                        local = %self.local_addr,
+                        "Direct SSH denied (peer is not a current member of this network or user is not the local agent account)"
+                    );
+                } else {
+                    tracing::info!(peer = %self.peer_hex, %user, "ssh denied (no matching rule)");
+                }
                 Ok(Auth::reject())
             }
             Some(rule) if rule.action == SshAction::Deny => {
@@ -658,5 +721,25 @@ impl Handler for SshHandler {
         self.pty_resize.lock().remove(&channel);
         session.close(channel)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod direct_policy_tests {
+    use super::direct_ssh_authorized;
+    use uuid::Uuid;
+
+    #[test]
+    fn admitted_same_network_peer_may_use_only_local_account() {
+        let network = Uuid::new_v4();
+        assert!(direct_ssh_authorized(network, network, "ADMIN", "admin"));
+        assert!(!direct_ssh_authorized(network, network, "root", "admin"));
+        assert!(!direct_ssh_authorized(
+            Uuid::new_v4(),
+            network,
+            "admin",
+            "admin"
+        ));
+        assert!(!direct_ssh_authorized(network, network, "admin", ""));
     }
 }

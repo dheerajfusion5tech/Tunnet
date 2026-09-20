@@ -514,7 +514,6 @@ mod tests {
             ipv4: ip.parse().unwrap(),
             tags: vec![],
             status: "active".into(),
-            ssh_host_key: None,
             sequence: 1,
             joined_at: now,
             grant: NetworkGrant {

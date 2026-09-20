@@ -180,7 +180,7 @@ pub async fn run_outbound(deps: OutboundDeps) -> anyhow::Result<()> {
         }
         let self_ip = acl.self_id.load().ip;
         #[cfg(feature = "ssh")]
-        let _ = ssh_nat::rewrite_outbound(&mut buf[..n], self_ip);
+        let _ = ssh_nat::rewrite_outbound(&mut buf[..n]);
         let packet = &buf[..n];
         let pkt = match packet::parse(packet) {
             Ok(p) => p,
@@ -407,7 +407,6 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
 
             let n = dg.len() as u64;
             #[cfg(feature = "ssh")]
-            let self_ip = acl.self_id.load().ip;
             // Generation already verified: device + token belong to the
             // generation loaded at reader start. Recheck cancellation
             // (not a lock) before the send so BringDown wins races.
@@ -415,9 +414,9 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
                 break;
             }
             #[cfg(feature = "ssh")]
-            let send_result = if ssh_nat::needs_inbound_rewrite(&dg, self_ip) {
+            let send_result = if ssh_nat::needs_inbound_rewrite(&dg) {
                 let mut packet = dg.to_vec();
-                let _ = ssh_nat::rewrite_inbound(&mut packet, self_ip);
+                let _ = ssh_nat::rewrite_inbound(&mut packet);
                 device.send(&packet).await
             } else {
                 device.send(dg.as_ref()).await

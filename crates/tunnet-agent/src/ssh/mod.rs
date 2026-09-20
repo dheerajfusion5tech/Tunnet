@@ -13,4 +13,4 @@ mod user;
 
 pub use host_key::host_pubkey_openssh;
 pub use listener::spawn_ssh_listener;
-pub use server::SshServeDeps;
+pub use server::{SshAuthorization, SshServeDeps};

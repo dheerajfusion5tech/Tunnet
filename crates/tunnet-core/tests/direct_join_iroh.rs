@@ -114,7 +114,6 @@ impl JoinPublisher for MemNet {
                 ipv4: entry.ipv4,
                 tags: vec![],
                 status: "active".into(),
-                ssh_host_key: None,
                 sequence: 1,
                 joined_at: entry.joined_at,
                 grant: grant.clone(),

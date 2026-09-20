@@ -5,6 +5,7 @@
 //! - `meta/epoch` - current network epoch (signed)
 //! - `meta/name` - optional display metadata
 //! - `peers/<endpoint_id>/record` - signed [`SignedMemberRecord`] JSON
+//! - `peers/<endpoint_id>/metadata` - endpoint-signed mutable metadata
 //! - `revocations/<endpoint_id>` - signed [`Revocation`] JSON
 //! - `policy/v1/bundle` - coordinator firewall policy bundle
 
@@ -38,10 +39,11 @@ use uuid::Uuid;
 use crate::acl::AclEngine;
 use crate::direct::auth::AuthCache;
 use crate::direct::grants::{
-    EpochRecord, Genesis, MEMBER_SCHEMA_VERSION, MemberRole, NetworkGrant, Revocation,
-    SignedMemberRecord, grant_expiry, sign_epoch, sign_grant, sign_member_record, sign_revocation,
-    validate_member_against_genesis, verify_epoch, verify_genesis, verify_member_record,
-    verify_revocation, verifying_key_from_hex,
+    EpochRecord, Genesis, MEMBER_METADATA_SCHEMA_VERSION, MEMBER_SCHEMA_VERSION, MemberRole,
+    NetworkGrant, Revocation, SignedMemberMetadata, SignedMemberRecord, grant_expiry, sign_epoch,
+    sign_grant, sign_member_metadata, sign_member_record, sign_revocation,
+    validate_member_against_genesis, verify_epoch, verify_genesis, verify_member_metadata,
+    verify_member_record, verify_revocation, verifying_key_from_hex,
 };
 use crate::routing::RoutingTable;
 use crate::state::{DirectState, StatePaths};
@@ -149,6 +151,10 @@ fn record_key(endpoint_id: &str) -> Bytes {
     Bytes::from(format!("peers/{endpoint_id}/record"))
 }
 
+fn metadata_key(endpoint_id: &str) -> Bytes {
+    Bytes::from(format!("peers/{endpoint_id}/metadata"))
+}
+
 fn revocation_key(endpoint_id: &str) -> Bytes {
     Bytes::from(format!("revocations/{endpoint_id}"))
 }
@@ -171,6 +177,7 @@ struct DocsInner {
     genesis: parking_lot::RwLock<Option<Genesis>>,
     topic_hash: String,
     coordinator_signing_key: Option<SigningKey>,
+    endpoint_signing_key: SigningKey,
     coordinator_verifying_key: String,
     network_epoch: Arc<AtomicU64>,
     content_key: String,
@@ -199,6 +206,7 @@ pub struct DocsBootstrap<'a> {
     pub self_endpoint_id: &'a str,
     pub self_entry: MembershipEntry,
     pub coordinator_signing_key: Option<SigningKey>,
+    pub endpoint_signing_key: SigningKey,
     pub coordinator_verifying_key: String,
     pub content_key: String,
     pub network_grant: Option<NetworkGrant>,
@@ -295,6 +303,7 @@ impl DocsMembership {
             self_endpoint_id,
             self_entry,
             coordinator_signing_key,
+            endpoint_signing_key,
             coordinator_verifying_key,
             content_key,
             network_grant,
@@ -331,6 +340,7 @@ impl DocsMembership {
                 genesis: parking_lot::RwLock::new(Some(direct.genesis.clone())),
                 topic_hash: direct.topic_hash.clone(),
                 coordinator_signing_key,
+                endpoint_signing_key,
                 coordinator_verifying_key,
                 network_epoch: network_epoch.clone(),
                 content_key,
@@ -508,7 +518,6 @@ impl DocsMembership {
             ipv4: entry.ipv4,
             tags: entry.tags.clone(),
             status: entry.status.clone(),
-            ssh_host_key: entry.ssh_host_key.clone(),
             sequence,
             joined_at: entry.joined_at,
             grant,
@@ -604,23 +613,67 @@ impl DocsMembership {
         self.refresh_seed_peers();
     }
 
-    /// Publish this node's SSH host pubkey by updating the self member record.
+    /// Publish endpoint-owned SSH metadata without coordinator authority.
     pub async fn set_ssh_host_key(&self, openssh_pubkey: &str) -> anyhow::Result<()> {
         let key = openssh_pubkey.trim();
         if key.is_empty() {
-            return Ok(());
+            anyhow::bail!("SSH host key is empty");
         }
-        let entry = {
-            let mut members = self.inner.members.lock();
-            let Some(entry) = members.get_mut(&self.inner.self_endpoint_id) else {
-                return Ok(());
+        anyhow::ensure!(
+            self.inner
+                .members
+                .lock()
+                .contains_key(&self.inner.self_endpoint_id),
+            "cannot publish SSH metadata without current membership"
+        );
+        let stream = self
+            .inner
+            .doc
+            .get_many(Query::all().key_exact(metadata_key(&self.inner.self_endpoint_id)))
+            .await
+            .context("read current SSH metadata")?;
+        tokio::pin!(stream);
+        let mut last_sequence = 0;
+        while let Some(item) = stream.next().await {
+            let entry = item.context("SSH metadata entry")?;
+            let Ok(bytes) = self.inner.blobs.get_bytes(entry.content_hash()).await else {
+                continue;
             };
-            entry.ssh_host_key = Some(key.to_string());
-            entry.clone()
-        };
-        if self.inner.coordinator_signing_key.is_some() {
-            self.write_self_record(&entry).await?;
+            let Ok(record) = serde_json::from_slice::<SignedMemberMetadata>(&bytes) else {
+                continue;
+            };
+            if record.network_id == self.inner.network_id
+                && record.endpoint_id == self.inner.self_endpoint_id
+                && verify_member_metadata(&record).is_ok()
+            {
+                last_sequence = last_sequence.max(record.sequence);
+            }
         }
+        let sequence = last_sequence.saturating_add(1);
+        let record = sign_member_metadata(
+            &self.inner.endpoint_signing_key,
+            SignedMemberMetadata {
+                schema_version: MEMBER_METADATA_SCHEMA_VERSION,
+                network_id: self.inner.network_id,
+                endpoint_id: self.inner.self_endpoint_id.clone(),
+                ssh_host_key: key.to_string(),
+                sequence,
+                sig: String::new(),
+            },
+        )?;
+        set_json(
+            &self.inner.doc,
+            self.inner.author,
+            metadata_key(&record.endpoint_id),
+            &record,
+        )
+        .await?;
+        self.inner
+            .members
+            .lock()
+            .get_mut(&record.endpoint_id)
+            .unwrap()
+            .ssh_host_key = Some(key.to_string());
         Ok(())
     }
 
@@ -793,9 +846,57 @@ impl DocsMembership {
                     joined_at: record.joined_at,
                     coordinator: record.coordinator,
                     status: "active".into(),
-                    ssh_host_key: record.ssh_host_key,
+                    ssh_host_key: None,
                 },
             );
+        }
+        let metadata_stream = self
+            .inner
+            .doc
+            .get_many(Query::all().key_prefix("peers/"))
+            .await
+            .context("get_many member metadata")?;
+        tokio::pin!(metadata_stream);
+        let mut effective_metadata: HashMap<String, SignedMemberMetadata> = HashMap::new();
+        while let Some(item) = metadata_stream.next().await {
+            let entry = item.context("member metadata entry")?;
+            let key = std::str::from_utf8(entry.key()).unwrap_or("");
+            let Some(rest) = key.strip_prefix("peers/") else {
+                continue;
+            };
+            let Some((endpoint_id, field)) = rest.split_once('/') else {
+                continue;
+            };
+            if field != "metadata"
+                || !map.contains_key(endpoint_id)
+                || revoked.contains(endpoint_id)
+            {
+                continue;
+            }
+            let Ok(bytes) = self.inner.blobs.get_bytes(entry.content_hash()).await else {
+                continue;
+            };
+            let Ok(metadata) = serde_json::from_slice::<SignedMemberMetadata>(&bytes) else {
+                continue;
+            };
+            if metadata.network_id != self.inner.network_id
+                || metadata.endpoint_id != endpoint_id
+                || verify_member_metadata(&metadata).is_err()
+            {
+                tracing::warn!(peer = %endpoint_id, "ignored invalid member metadata");
+                continue;
+            }
+            let replace = effective_metadata
+                .get(endpoint_id)
+                .is_none_or(|current| metadata.sequence > current.sequence);
+            if replace {
+                effective_metadata.insert(endpoint_id.to_string(), metadata);
+            }
+        }
+        for (endpoint_id, metadata) in effective_metadata {
+            if let Some(member) = map.get_mut(&endpoint_id) {
+                member.ssh_host_key = Some(metadata.ssh_host_key);
+            }
         }
         let mut addresses = HashMap::new();
         for member in map.values() {
@@ -852,9 +953,20 @@ impl DocsMembership {
         if let Ok(json) = serde_json::to_vec_pretty(&members) {
             let _ = std::fs::write(self.inner.paths.members_cache_file(), json);
         }
+        let all_peers: Vec<tunnet_common::PeerEntry> = routes
+            .peers()
+            .into_iter()
+            .map(|peer| tunnet_common::PeerEntry {
+                ip: peer.ip,
+                endpoint_id: peer.endpoint_hex.clone(),
+                hostname: peer.hostname.clone(),
+                tags: peer.tags.clone(),
+                ssh_host_key: peer.ssh_host_key.clone(),
+            })
+            .collect();
         if let Err(e) = crate::known_hosts::sync_known_hosts(
             &self.inner.paths.known_hosts_file(),
-            &peers,
+            &all_peers,
             &dns.suffix,
         ) {
             tracing::debug!(?e, "known_hosts sync skipped");

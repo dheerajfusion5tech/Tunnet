@@ -315,8 +315,17 @@ pub(crate) async fn start_mesh(
     let status_snapshot = tunnet_core::local_api::DataPlaneStatusSnapshot::new(false);
 
     // Child configs for the supervisor tree.
-    #[cfg(any(feature = "ssh", feature = "metrics-serve"))]
-    let ssh_bind = dataplane_ssh_bind(&node);
+    #[cfg(feature = "ssh")]
+    let ssh_bindings: HashMap<std::net::Ipv4Addr, uuid::Uuid> = if is_direct {
+        node.direct
+            .iter()
+            .map(|(network_id, runtime)| (runtime.state.self_record.ipv4, *network_id))
+            .collect()
+    } else {
+        HashMap::from([(local_addrs[0], network_id)])
+    };
+    #[cfg(feature = "metrics-serve")]
+    let metrics_bind = local_addrs[0];
     let dataplane_cfg = DataPlaneActorConfig {
         ifname: args.ifname.clone(),
         local_addrs,
@@ -368,14 +377,8 @@ pub(crate) async fn start_mesh(
     };
 
     // Presence args per network (Direct: one per network; Managed: one).
-    let presence_args = build_presence_args(
-        &node,
-        is_direct,
-        network_id,
-        &hostname,
-        &dns_cfg.suffix,
-        args.disable_gossip,
-    );
+    let presence_args =
+        build_presence_args(&node, is_direct, network_id, &hostname, args.disable_gossip);
 
     // Single event bus shared by the actors, the updater, and the Local API.
     let (events_tx, _) = tokio::sync::broadcast::channel(256);
@@ -608,12 +611,6 @@ pub(crate) async fn start_mesh(
         .unwrap_or("tunnet")
         .to_string();
 
-    #[cfg(feature = "ssh")]
-    for rt in node.direct.values() {
-        rt.firewall
-            .ensure_inbound_tcp_allow(crate::ssh_nat::SSH_EXTERNAL_PORT);
-    }
-
     let ssh_handle = {
         #[cfg(feature = "ssh")]
         {
@@ -638,6 +635,14 @@ pub(crate) async fn start_mesh(
                 signed: node.signed.clone(),
                 hostname: hostname.clone(),
                 network_name: network_name.clone(),
+                authorization: if is_direct {
+                    crate::ssh::SshAuthorization::Direct {
+                        local_network: uuid::Uuid::nil(),
+                        local_user: String::new(),
+                    }
+                } else {
+                    crate::ssh::SshAuthorization::Managed
+                },
             };
             if ssh_deps.cp_tx.is_none() {
                 tracing::warn!(
@@ -645,7 +650,7 @@ pub(crate) async fn start_mesh(
                 );
             }
             let ssh_handle =
-                match crate::ssh::spawn_ssh_listener(ssh_bind, &node.paths, ssh_deps).await {
+                match crate::ssh::spawn_ssh_listener(&ssh_bindings, &node.paths, ssh_deps).await {
                     Ok(handle) => Some(handle),
                     Err(e) => {
                         tracing::error!(?e, "failed to start SSH listener");
@@ -731,7 +736,7 @@ pub(crate) async fn start_mesh(
     });
 
     #[cfg(feature = "metrics-serve")]
-    crate::metrics::spawn_listeners(metrics.clone(), &args.metrics_bind, ssh_bind);
+    crate::metrics::spawn_listeners(metrics.clone(), &args.metrics_bind, metrics_bind);
 
     if agent_cfg.effective_service_relay() && lan {
         if let Some(gossip) = node.shared_gossip() {
@@ -821,15 +826,6 @@ fn spawn_view_pump(
 }
 
 /// Graceful drain with bounded waits; abort only as a final fallback.
-#[cfg(any(feature = "ssh", feature = "metrics-serve"))]
-fn dataplane_ssh_bind(node: &CoreNode) -> std::net::Ipv4Addr {
-    node.persisted
-        .direct_networks()
-        .first()
-        .map(|d| d.self_record.ipv4)
-        .unwrap_or(node.self_ipv4)
-}
-
 async fn drain(
     supervisor: kameo::actor::ActorRef<AgentSupervisor>,
     ssh_handle: Option<tokio::task::JoinHandle<()>>,
@@ -867,7 +863,6 @@ fn build_presence_args(
     is_direct: bool,
     network_id: Uuid,
     hostname: &str,
-    dns_suffix: &str,
     disable_gossip: bool,
 ) -> Vec<PresenceActorArgs> {
     if disable_gossip {
@@ -880,7 +875,6 @@ fn build_presence_args(
     let signing_key = node.identity.signing_key.clone();
     let self_endpoint_id = node.endpoint_id_hex();
     let agent_version = env!("CARGO_PKG_VERSION").to_string();
-    let known_hosts_file = node.paths.known_hosts_file();
     let mut out = Vec::new();
     if is_direct {
         for rt in node.direct.values() {
@@ -899,11 +893,8 @@ fn build_presence_args(
                     self_endpoint_id: self_endpoint_id.clone(),
                     hostname: rt.state.hostname.clone(),
                     mesh_ip: Some(rt.state.self_record.ipv4.to_string()),
-                    ssh_host_key: None,
                     agent_version: agent_version.clone(),
                     bootstrap: peers,
-                    known_hosts_file: Some(known_hosts_file.clone()),
-                    dns_suffix: Some(dns_suffix.to_string()),
                 },
                 tables: node.presence_tables.clone(),
             });
@@ -924,11 +915,8 @@ fn build_presence_args(
                 self_endpoint_id,
                 hostname: hostname.to_string(),
                 mesh_ip: Some(node.self_ipv4.to_string()),
-                ssh_host_key: None,
                 agent_version,
                 bootstrap: peers,
-                known_hosts_file: Some(known_hosts_file),
-                dns_suffix: Some(dns_suffix.to_string()),
             },
             tables: node.presence_tables.clone(),
         });
