@@ -707,7 +707,7 @@ impl CoreNode {
                 Err(e) => {
                     tracing::error!(
                         network = %network_name,
-                        error = %e,
+                        error = ?e,
                         "skipping Direct network (leave it or re-join with a fresh invite)"
                     );
                     skipped.push(network_name);

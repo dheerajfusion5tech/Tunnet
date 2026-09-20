@@ -279,16 +279,6 @@ impl DocsMembership {
         Ok(ticket.to_string())
     }
 
-    pub async fn share_read_ticket(&self) -> anyhow::Result<String> {
-        let ticket = self
-            .inner
-            .doc
-            .share(ShareMode::Read, AddrInfoOptions::RelayAndAddresses)
-            .await
-            .context("share read ticket")?;
-        Ok(ticket.to_string())
-    }
-
     pub async fn bootstrap(
         cfg: DocsBootstrap<'_>,
     ) -> anyhow::Result<(Self, Option<String>, Option<String>)> {
@@ -553,7 +543,7 @@ impl DocsMembership {
         entry: MembershipEntry,
     ) -> anyhow::Result<crate::direct::join::JoinAdmission> {
         let (grant, content_key, record) = self.admit_peer(&entry).await?;
-        let ticket = self.share_read_ticket().await?;
+        let ticket = self.share_write_ticket().await?;
         Ok(crate::direct::join::JoinAdmission {
             genesis: self.genesis().context("missing genesis")?,
             ipv4: entry.ipv4,
@@ -702,42 +692,45 @@ impl DocsMembership {
         let coord_vk = verifying_key_from_hex(&self.inner.coordinator_verifying_key)
             .context("coordinator verifying key")?;
 
-        let genesis = if let Some(bytes) = self.get_key_bytes(&genesis_key()).await? {
-            let genesis: Genesis = serde_json::from_slice(&bytes).map_err(|_| {
-                anyhow::anyhow!("unsupported legacy Direct network: recreate with `tunnet create`")
-            })?;
-            verify_genesis(&coord_vk, &genesis)?;
-            if genesis.network_id != self.inner.network_id {
-                anyhow::bail!("genesis network_id mismatch");
-            }
-            if let Some(local) = self.inner.genesis.read().clone()
-                && local.address_plan != genesis.address_plan
+        let local_genesis = self.inner.genesis.read().clone();
+        let mut verified_genesis = None;
+        for bytes in self.get_all_key_bytes(&genesis_key()).await? {
+            let Ok(candidate) = serde_json::from_slice::<Genesis>(&bytes) else {
+                continue;
+            };
+            if verify_genesis(&coord_vk, &candidate).is_ok()
+                && candidate.network_id == self.inner.network_id
+                && local_genesis
+                    .as_ref()
+                    .is_none_or(|local| local.address_plan == candidate.address_plan)
             {
-                anyhow::bail!("genesis address plan mismatch");
+                verified_genesis = Some(candidate);
+                break;
             }
-            *self.inner.genesis.write() = Some(genesis.clone());
-            genesis
-        } else if let Some(local) = self.inner.genesis.read().clone() {
-            local
-        } else {
-            anyhow::bail!("missing genesis; recreate with `tunnet create`");
-        };
+        }
+        let genesis = verified_genesis
+            .or(local_genesis)
+            .context("missing valid genesis; recreate with `tunnet create`")?;
+        *self.inner.genesis.write() = Some(genesis.clone());
 
         let mut min_epoch = 0u64;
-        if let Some(bytes) = self.get_key_bytes(&epoch_key()).await? {
-            let epoch: EpochRecord = serde_json::from_slice(&bytes)?;
-            verify_epoch(&coord_vk, &epoch)?;
-            min_epoch = epoch.network_epoch;
-            self.inner
-                .network_epoch
-                .store(epoch.network_epoch, Ordering::Relaxed);
+        for bytes in self.get_all_key_bytes(&epoch_key()).await? {
+            let Ok(epoch) = serde_json::from_slice::<EpochRecord>(&bytes) else {
+                continue;
+            };
+            if verify_epoch(&coord_vk, &epoch).is_ok() {
+                min_epoch = min_epoch.max(epoch.network_epoch);
+            }
+        }
+        if min_epoch > 0 {
+            self.inner.network_epoch.store(min_epoch, Ordering::Relaxed);
         }
 
         let mut revoked = HashSet::new();
         let rev_stream = self
             .inner
             .doc
-            .get_many(Query::single_latest_per_key().key_prefix("revocations/"))
+            .get_many(Query::all().key_prefix("revocations/"))
             .await
             .context("get_many revocations")?;
         tokio::pin!(rev_stream);
@@ -765,7 +758,7 @@ impl DocsMembership {
         let stream = self
             .inner
             .doc
-            .get_many(Query::single_latest_per_key().key_prefix("peers/"))
+            .get_many(Query::all().key_prefix("peers/"))
             .await
             .context("get_many peers")?;
         tokio::pin!(stream);
@@ -817,20 +810,32 @@ impl DocsMembership {
             if record.status == "kicked" || revoked.contains(&record.endpoint_id) {
                 continue;
             }
-            map.insert(
-                endpoint_id.to_string(),
-                MembershipEntry {
-                    endpoint_id: record.endpoint_id,
-                    hostname: record.hostname,
-                    ipv4: record.ipv4,
-                    tags: record.tags,
-                    joined_at: record.joined_at,
-                    coordinator: record.coordinator,
-                    status: "active".into(),
-                    ssh_host_key: None,
-                },
-            );
+            let replace = map
+                .get(endpoint_id)
+                .is_none_or(|(sequence, _): &(u64, MembershipEntry)| record.sequence > *sequence);
+            if replace {
+                map.insert(
+                    endpoint_id.to_string(),
+                    (
+                        record.sequence,
+                        MembershipEntry {
+                            endpoint_id: record.endpoint_id,
+                            hostname: record.hostname,
+                            ipv4: record.ipv4,
+                            tags: record.tags,
+                            joined_at: record.joined_at,
+                            coordinator: record.coordinator,
+                            status: "active".into(),
+                            ssh_host_key: None,
+                        },
+                    ),
+                );
+            }
         }
+        let mut map: HashMap<String, MembershipEntry> = map
+            .into_iter()
+            .map(|(endpoint_id, (_, member))| (endpoint_id, member))
+            .collect();
         let metadata_stream = self
             .inner
             .doc
@@ -1042,38 +1047,43 @@ impl DocsMembership {
     ) -> anyhow::Result<Option<crate::direct::policy_docs::SuggestedPolicy>> {
         use crate::direct::policy_docs::POLICY_BUNDLE_KEY;
 
-        let bundle_bytes = self.get_key_bytes(POLICY_BUNDLE_KEY.as_bytes()).await?;
-        let Some(bundle_bytes) = bundle_bytes else {
-            return Ok(None);
-        };
-        if bundle_bytes.is_empty() {
-            return Ok(None);
+        let vk = verifying_key_from_hex(&self.inner.coordinator_verifying_key)?;
+        let mut effective = None;
+        for bytes in self.get_all_key_bytes(POLICY_BUNDLE_KEY.as_bytes()).await? {
+            let Ok(candidate) =
+                serde_json::from_slice::<crate::direct::policy_docs::PolicyBundleDoc>(&bytes)
+            else {
+                continue;
+            };
+            if crate::direct::policy_docs::verify_policy_bundle(&vk, &candidate).is_ok()
+                && effective.as_ref().is_none_or(
+                    |current: &crate::direct::policy_docs::PolicyBundleDoc| {
+                        candidate.version > current.version
+                    },
+                )
+            {
+                effective = Some(candidate);
+            }
         }
-        let bundle: crate::direct::policy_docs::PolicyBundleDoc =
-            serde_json::from_slice(&bundle_bytes)?;
-        Ok(Some(bundle))
+        Ok(effective)
     }
 
-    async fn get_key_bytes(&self, key: &[u8]) -> anyhow::Result<Option<Bytes>> {
+    async fn get_all_key_bytes(&self, key: &[u8]) -> anyhow::Result<Vec<Bytes>> {
         let stream = self
             .inner
             .doc
-            .get_many(Query::single_latest_per_key().key_exact(key))
+            .get_many(Query::all().key_exact(key))
             .await
-            .context("get_key")?;
+            .context("get all key entries")?;
         tokio::pin!(stream);
-        let Some(item) = stream.next().await else {
-            return Ok(None);
-        };
-        let entry = item?;
-        let hash = entry.content_hash();
-        let bytes = self
-            .inner
-            .blobs
-            .get_bytes(hash)
-            .await
-            .map_err(|e| anyhow::anyhow!("get key blob: {e}"))?;
-        Ok(Some(bytes))
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            let entry = item?;
+            if let Ok(bytes) = self.inner.blobs.get_bytes(entry.content_hash()).await {
+                out.push(bytes);
+            }
+        }
+        Ok(out)
     }
 
     pub async fn publish_firewall_policy(
