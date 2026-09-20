@@ -33,12 +33,7 @@ fn load_or_generate_file(path: &str) -> anyhow::Result<SigningKey> {
         return Ok(SigningKey::from_bytes(&arr));
     }
     let sk = SigningKey::generate(&mut rand::rng());
-    std::fs::write(p, sk.to_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))?;
-    }
+    tunnet_common::persistence::atomic_write_private(p, sk.to_bytes())?;
     tracing::warn!(
         path,
         "TUNNET_POLICY_KEY not set; generated local policy key file (not suitable for multi-replica prod)"

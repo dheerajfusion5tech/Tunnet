@@ -308,7 +308,7 @@ fn persist(inner: &Inner) -> anyhow::Result<()> {
     if let Some(parent) = inner.path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&inner.path, serde_json::to_vec_pretty(&inner.disk)?)?;
+    tunnet_common::persistence::atomic_write(&inner.path, serde_json::to_vec_pretty(&inner.disk)?)?;
     Ok(())
 }
 

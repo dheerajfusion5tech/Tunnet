@@ -128,16 +128,9 @@ fn needs_renewal(cert_pem: &str) -> bool {
 }
 
 fn save_cached(cfg: &AcmeConfig, cert: &str, key: &str) -> anyhow::Result<()> {
-    std::fs::write(cfg.dir.join(CERT_FILE), cert)?;
-    std::fs::write(cfg.dir.join(KEY_FILE), key)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(cfg.dir.join(KEY_FILE))?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(cfg.dir.join(KEY_FILE), perms)?;
-    }
-    std::fs::write(cfg.dir.join(DOMAINS_FILE), cfg.domains.join("\n"))?;
+    tunnet_common::persistence::atomic_write(cfg.dir.join(CERT_FILE), cert)?;
+    tunnet_common::persistence::atomic_write_private(cfg.dir.join(KEY_FILE), key)?;
+    tunnet_common::persistence::atomic_write(cfg.dir.join(DOMAINS_FILE), cfg.domains.join("\n"))?;
     Ok(())
 }
 
@@ -248,14 +241,7 @@ async fn load_or_create_account(cfg: &AcmeConfig, directory: &str) -> anyhow::Re
         .context("create ACME account")?;
 
     let json = serde_json::to_string_pretty(&credentials)?;
-    std::fs::write(&account_path, json)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&account_path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(&account_path, perms)?;
-    }
+    tunnet_common::persistence::atomic_write_private(&account_path, json)?;
     Ok(account)
 }
 

@@ -328,7 +328,7 @@ impl TunnetConfig {
     pub fn save(&self, paths: &StatePaths) -> anyhow::Result<()> {
         paths.ensure()?;
         let s = toml::to_string_pretty(self).context("serialize tunnet.toml")?;
-        std::fs::write(paths.config_toml_file(), s)?;
+        tunnet_common::persistence::atomic_write(paths.config_toml_file(), s)?;
         Ok(())
     }
 

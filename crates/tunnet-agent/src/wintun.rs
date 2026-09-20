@@ -29,17 +29,7 @@ pub fn materialize() -> anyhow::Result<PathBuf> {
     {
         return Ok(dest);
     }
-    let tmp = dest.with_extension("dll.tmp");
-    std::fs::write(&tmp, WINTUN).with_context(|| format!("write {}", tmp.display()))?;
-    match std::fs::rename(&tmp, &dest) {
-        Ok(()) => Ok(dest),
-        Err(_) if dest.is_file() => {
-            let _ = std::fs::remove_file(&tmp);
-            Ok(dest)
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(error).with_context(|| format!("replace {}", dest.display()))
-        }
-    }
+    tunnet_common::persistence::atomic_write(&dest, WINTUN)
+        .with_context(|| format!("write {}", dest.display()))?;
+    Ok(dest)
 }

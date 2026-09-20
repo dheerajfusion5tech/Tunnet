@@ -159,15 +159,15 @@ fn restore_unit(
     for name in names {
         let source = previous.join(name);
         if source.is_file() {
-            replace_file(&source, &install.join(name))?;
+            replace_install_file(&source, &install.join(name))?;
         }
     }
     Ok(())
 }
 
-fn replace_file(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
-    let staged = dest.with_extension("rollback");
-    let rejected = dest.with_extension("rejected");
+pub(crate) fn replace_install_file(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    let staged = dest.with_extension("replacement");
+    let rejected = dest.with_extension("replaced");
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_file(&rejected);
     std::fs::copy(src, &staged)?;
@@ -191,7 +191,7 @@ fn core_unit_names() -> &'static [&'static str] {
 fn write_pending(paths: &StatePaths, pending: &PendingUpdate) -> Result<()> {
     std::fs::create_dir_all(paths.update_dir())?;
     let json = serde_json::to_vec_pretty(pending)?;
-    std::fs::write(paths.update_pending_file(), json)?;
+    tunnet_common::persistence::atomic_write(paths.update_pending_file(), json)?;
     Ok(())
 }
 

@@ -145,13 +145,18 @@ pub fn stage_daemon_exe(state_dir: Option<&str>) -> anyhow::Result<PathBuf> {
         .zip(dest.canonicalize().ok())
         .is_some_and(|(a, b)| a == b);
     if !source_is_dest {
-        atomic_copy(&source, &dest)?;
+        tunnet_common::persistence::atomic_copy(&source, &dest).map_err(|error| {
+            anyhow::anyhow!("copy {} to {}: {error}", source.display(), dest.display())
+        })?;
     }
 
     if let Some(dir) = source.parent() {
         let cli = dir.join(cli_name());
         if cli.is_file() {
-            atomic_copy(&cli, &dest_dir.join(cli_name()))?;
+            let cli_dest = dest_dir.join(cli_name());
+            tunnet_common::persistence::atomic_copy(&cli, &cli_dest).map_err(|error| {
+                anyhow::anyhow!("copy {} to {}: {error}", cli.display(), cli_dest.display())
+            })?;
         }
     }
 
@@ -180,36 +185,6 @@ pub fn wipe_state_dir(dir: &Path) -> anyhow::Result<()> {
                 anyhow::anyhow!("wipe {} (is tunnetd still running?): {e}", path.display())
             })?;
         }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn atomic_copy(source: &Path, dest: &Path) -> anyhow::Result<()> {
-    if dest.is_file() && same_artifact(source, dest) {
-        return Ok(());
-    }
-    let tmp = dest.with_extension("staging");
-    std::fs::copy(source, &tmp)
-        .map_err(|e| anyhow::anyhow!("copy {} → {}: {e}", source.display(), tmp.display()))?;
-    #[cfg(windows)]
-    {
-        // On Windows, replace via remove+rename; ReplaceFile is overkill here.
-        if dest.exists() {
-            std::fs::remove_file(dest).map_err(|e| {
-                anyhow::anyhow!(
-                    "replace {}: {e} (stop the tunnet service first)",
-                    dest.display()
-                )
-            })?;
-        }
-        std::fs::rename(&tmp, dest)
-            .map_err(|e| anyhow::anyhow!("rename {} → {}: {e}", tmp.display(), dest.display()))?;
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::rename(&tmp, dest)
-            .map_err(|e| anyhow::anyhow!("rename {} → {}: {e}", tmp.display(), dest.display()))?;
     }
     Ok(())
 }

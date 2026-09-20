@@ -199,26 +199,12 @@ fn seal_secrets(
     let mut blob = Vec::with_capacity(12 + ciphertext.len());
     blob.extend_from_slice(&nonce);
     blob.extend_from_slice(&ciphertext);
-    std::fs::write(paths.secrets_file(), &blob)
+    tunnet_common::persistence::atomic_write_private(paths.secrets_file(), &blob)
         .with_context(|| format!("write {}", paths.secrets_file().display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ =
-            std::fs::set_permissions(paths.secrets_file(), std::fs::Permissions::from_mode(0o600));
-    }
 
     let meta_json = serde_json::to_vec_pretty(&meta).context("serialize seal meta")?;
-    std::fs::write(paths.secrets_meta_file(), meta_json)
+    tunnet_common::persistence::atomic_write_private(paths.secrets_meta_file(), &meta_json)
         .with_context(|| format!("write {}", paths.secrets_meta_file().display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            paths.secrets_meta_file(),
-            std::fs::Permissions::from_mode(0o600),
-        );
-    }
 
     dek.zeroize();
     tracing::info!(tier = %tier.as_str(), "agent secrets sealed");
@@ -615,6 +601,28 @@ mod tests {
             assert!(!toml.contains("relay-secret"));
         }
         let _ = policy;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_files_replace_symlinks_without_following_them() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let (_tmp, paths) = test_paths();
+        paths.ensure().unwrap();
+        let victim = paths.root().join("victim");
+        std::fs::write(&victim, b"do not overwrite").unwrap();
+        symlink(&victim, paths.secrets_file()).unwrap();
+        symlink(&victim, paths.secrets_meta_file()).unwrap();
+
+        seal_secrets(&paths, &sample_secrets(), SealTier::Plaintext).unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not overwrite");
+        for path in [paths.secrets_file(), paths.secrets_meta_file()] {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            assert!(metadata.file_type().is_file());
+            assert_eq!(metadata.mode() & 0o777, 0o600);
+        }
     }
 
     #[test]

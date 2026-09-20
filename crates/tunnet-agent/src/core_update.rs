@@ -325,7 +325,7 @@ fn activate_verified(paths: &StatePaths, manifest: &CoreManifest) -> anyhow::Res
     }
     let activate = (|| -> anyhow::Result<()> {
         for name in unit_names() {
-            replace_file(&root.join(name), &install.join(name))?;
+            crate::auto_update::replace_install_file(&root.join(name), &install.join(name))?;
         }
         crate::auto_update::stage_pending(
             paths,
@@ -359,7 +359,7 @@ fn restore_previous_unit(previous: &Path, install: &Path) -> anyhow::Result<()> 
     for name in unit_names() {
         let source = previous.join(name);
         if source.is_file() {
-            replace_file(&source, &install.join(name))?;
+            crate::auto_update::replace_install_file(&source, &install.join(name))?;
         }
     }
     Ok(())
@@ -385,20 +385,6 @@ fn unit_names() -> &'static [&'static str] {
 #[cfg(not(windows))]
 fn unit_names() -> &'static [&'static str] {
     &["tunnet", "tunnetd"]
-}
-
-fn replace_file(source: &Path, dest: &Path) -> anyhow::Result<()> {
-    let staged = dest.with_extension("new");
-    let replaced = dest.with_extension("replaced");
-    let _ = std::fs::remove_file(&staged);
-    let _ = std::fs::remove_file(&replaced);
-    std::fs::copy(source, &staged)?;
-    if dest.exists() {
-        std::fs::rename(dest, &replaced)?;
-    }
-    std::fs::rename(staged, dest)?;
-    let _ = std::fs::remove_file(replaced);
-    Ok(())
 }
 
 #[cfg(windows)]

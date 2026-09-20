@@ -31,6 +31,7 @@ rust-version = "1.97"
 license = "MPL-2.0"
 
 [workspace.dependencies]
+atomic-write-file = "0.3"
 anyhow = "1"
 thiserror = "2"
 kameo = { version = "0.22.2", default-features = false, features = [

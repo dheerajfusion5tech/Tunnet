@@ -612,7 +612,7 @@ pub async fn run_upgrade(args: UpgradeArgs, state_dir: Option<&str>) -> anyhow::
         "network_id": resp.network_id,
         "network_name": resp.network_name,
     });
-    std::fs::write(
+    tunnet_common::persistence::atomic_write_private(
         paths.upgrade_notice_file(),
         serde_json::to_vec_pretty(&notice)?,
     )?;

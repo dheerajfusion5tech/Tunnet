@@ -60,7 +60,7 @@ fn load_pending(paths: &StatePaths) -> anyhow::Result<Vec<ConnectPending>> {
 #[cfg(feature = "local_api")]
 fn save_pending(paths: &StatePaths, list: &[ConnectPending]) -> anyhow::Result<()> {
     paths.ensure()?;
-    std::fs::write(
+    tunnet_common::persistence::atomic_write(
         paths.connect_pending_file(),
         serde_json::to_vec_pretty(list)?,
     )?;
@@ -367,7 +367,8 @@ pub async fn handle_inbound_connect(
         hostname,
         received_at: Timestamp::now(),
     });
-    let _ = std::fs::write(&pending_path, serde_json::to_vec_pretty(&list)?);
+    let _ =
+        tunnet_common::persistence::atomic_write(&pending_path, serde_json::to_vec_pretty(&list)?);
 
     let resp = serde_json::json!({
         "type": "connect_response",

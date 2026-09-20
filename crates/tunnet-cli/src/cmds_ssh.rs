@@ -435,7 +435,7 @@ async fn run_ssh_config(path: Option<String>, state_dir: Option<String>) -> anyh
         String::new()
     };
     let updated = upsert_marked_block(&existing, SSH_CONFIG_BEGIN, SSH_CONFIG_END, &block);
-    std::fs::write(&config_path, updated)
+    tunnet_common::persistence::atomic_write(&config_path, updated)
         .with_context(|| format!("write {}", config_path.display()))?;
     println!("Wrote Tunnet SSH config block to {}", config_path.display());
     println!("You can now: ssh user@hostname.tunnet");

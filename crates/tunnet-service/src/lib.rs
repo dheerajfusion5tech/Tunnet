@@ -541,7 +541,8 @@ fn install_systemd(exe: &str, state_dir: Option<&str>) -> anyhow::Result<()> {
     use anyhow::Context;
     let unit = render_systemd_unit(exe, state_dir);
     let path = std::path::Path::new("/etc/systemd/system/tunnet.service");
-    std::fs::write(path, unit).with_context(|| format!("write {}", path.display()))?;
+    tunnet_common::persistence::atomic_write(path, unit)
+        .with_context(|| format!("write {}", path.display()))?;
     run_cmd("systemctl", &["daemon-reload"])?;
     Ok(())
 }
@@ -593,7 +594,8 @@ fn install_launchd(exe: &str, state_dir: Option<&str>) -> anyhow::Result<()> {
 "#
     );
     let path = launchd_plist_path();
-    std::fs::write(&path, plist).with_context(|| format!("write {}", path.display()))?;
+    tunnet_common::persistence::atomic_write(&path, plist)
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

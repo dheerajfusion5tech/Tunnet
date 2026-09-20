@@ -14,6 +14,6 @@ pub fn queue_kick(paths: &StatePaths, network_id: Uuid, peer_id: &str) -> anyhow
     if !kicks.iter().any(|id| id == peer_id) {
         kicks.push(peer_id.to_string());
     }
-    std::fs::write(&kick_path, serde_json::to_vec_pretty(&kicks)?)?;
+    tunnet_common::persistence::atomic_write(&kick_path, serde_json::to_vec_pretty(&kicks)?)?;
     Ok(())
 }

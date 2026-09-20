@@ -283,7 +283,7 @@ impl PersistedState {
     pub fn save_public(&self, paths: &StatePaths) -> anyhow::Result<()> {
         paths.ensure()?;
         let json = serde_json::to_vec_pretty(self)?;
-        std::fs::write(paths.state_file(), json)?;
+        tunnet_common::persistence::atomic_write(paths.state_file(), json)?;
         Ok(())
     }
 
@@ -475,7 +475,7 @@ pub fn save_snapshot_cache(
 ) -> anyhow::Result<()> {
     paths.ensure()?;
     let json = serde_json::to_vec(snap)?;
-    std::fs::write(paths.cache_file(), json)?;
+    tunnet_common::persistence::atomic_write(paths.cache_file(), json)?;
     Ok(())
 }
 

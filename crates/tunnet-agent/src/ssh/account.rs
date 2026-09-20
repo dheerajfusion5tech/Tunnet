@@ -59,28 +59,24 @@ mod unix {
     use super::LocalAccount;
     use anyhow::{Context, bail};
     use std::ffi::{CStr, CString};
+    use std::io;
     use std::path::PathBuf;
 
     pub fn resolve(username: &str) -> anyhow::Result<LocalAccount> {
         let c_user = CString::new(username).context("username")?;
-        let mut pwd = unsafe { std::mem::zeroed::<libc::passwd>() };
-        let mut buf = vec![0u8; 16 * 1024];
-        let mut result: *mut libc::passwd = std::ptr::null_mut();
-        // SAFETY: getpwnam_r writes into pwd/buf and sets result on success.
-        let rc = unsafe {
+        let Some((pwd, _buf)) = lookup_passwd(|pwd, buf, result| unsafe {
             libc::getpwnam_r(
                 c_user.as_ptr(),
-                &mut pwd,
+                pwd,
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                &mut result,
+                result,
             )
-        };
-        if rc != 0 || result.is_null() {
+        })
+        .with_context(|| format!("look up user `{username}`"))?
+        else {
             bail!("user `{username}` not found");
-        }
-        // SAFETY: result is non-null and aliases pwd.
-        let pwd = unsafe { &*result };
+        };
         let username = cstr(pwd.pw_name)?.to_string();
         let home_dir = PathBuf::from(cstr(pwd.pw_dir)?.to_string());
         let shell = {
@@ -139,24 +135,45 @@ mod unix {
     }
 
     fn resolve_uid(uid: u32) -> anyhow::Result<LocalAccount> {
-        let mut pwd = unsafe { std::mem::zeroed::<libc::passwd>() };
-        let mut buf = vec![0u8; 16 * 1024];
-        let mut result: *mut libc::passwd = std::ptr::null_mut();
-        let rc = unsafe {
-            libc::getpwuid_r(
-                uid,
-                &mut pwd,
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-                &mut result,
-            )
-        };
-        if rc != 0 || result.is_null() {
+        let Some((pwd, _buf)) = lookup_passwd(|pwd, buf, result| unsafe {
+            libc::getpwuid_r(uid, pwd, buf.as_mut_ptr().cast(), buf.len(), result)
+        })
+        .with_context(|| format!("look up uid {uid}"))?
+        else {
             bail!("uid {uid} not found");
-        }
-        let pwd = unsafe { &*result };
+        };
         let username = cstr(pwd.pw_name)?.to_string();
         resolve(&username)
+    }
+
+    fn lookup_passwd(
+        mut lookup: impl FnMut(&mut libc::passwd, &mut [u8], &mut *mut libc::passwd) -> libc::c_int,
+    ) -> io::Result<Option<(libc::passwd, Vec<u8>)>> {
+        let configured_size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+        let mut buffer_len = usize::try_from(configured_size)
+            .ok()
+            .filter(|size| *size > 0)
+            .unwrap_or(16 * 1024);
+
+        loop {
+            let mut pwd = unsafe { std::mem::zeroed::<libc::passwd>() };
+            let mut buffer = vec![0u8; buffer_len];
+            let mut result = std::ptr::null_mut();
+            let rc = lookup(&mut pwd, &mut buffer, &mut result);
+            if rc == libc::ERANGE {
+                buffer_len = buffer_len.checked_mul(2).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::OutOfMemory, "password entry is too large")
+                })?;
+                continue;
+            }
+            if rc != 0 {
+                return Err(io::Error::from_raw_os_error(rc));
+            }
+            if result.is_null() {
+                return Ok(None);
+            }
+            return Ok(Some((pwd, buffer)));
+        }
     }
 
     fn cstr(ptr: *const libc::c_char) -> anyhow::Result<String> {
@@ -166,6 +183,42 @@ mod unix {
         Ok(unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::lookup_passwd;
+
+        #[test]
+        fn passwd_lookup_retries_erange() {
+            let mut attempts = 0;
+            let (pwd, _buffer) = lookup_passwd(|pwd, _buffer, result| {
+                attempts += 1;
+                if attempts == 1 {
+                    return libc::ERANGE;
+                }
+                pwd.pw_uid = 42;
+                *result = pwd;
+                0
+            })
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(attempts, 2);
+            assert_eq!(pwd.pw_uid, 42);
+        }
+
+        #[test]
+        fn passwd_lookup_preserves_real_errors() {
+            let error = lookup_passwd(|_, _, _| libc::EIO).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        }
+
+        #[test]
+        fn passwd_lookup_reports_missing_entry_separately() {
+            let result = lookup_passwd(|_, _, _| 0).unwrap();
+            assert!(result.is_none());
+        }
     }
 }
 

@@ -75,7 +75,8 @@ pub fn sync_known_hosts(path: &Path, peers: &[PeerEntry], dns_suffix: &str) -> a
     if !body.is_empty() {
         body.push('\n');
     }
-    std::fs::write(path, body).with_context(|| format!("write {}", path.display()))?;
+    tunnet_common::persistence::atomic_write(path, body)
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -117,7 +118,7 @@ pub fn upsert_known_hosts_entry(
     if !body.is_empty() {
         body.push('\n');
     }
-    std::fs::write(path, body)?;
+    tunnet_common::persistence::atomic_write(path, body)?;
     Ok(())
 }
 

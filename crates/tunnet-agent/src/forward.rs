@@ -165,14 +165,28 @@ fn install_masquerade(uplink: &str) -> bool {
     {
         // pf anchor owned by Tunnet.
         let rules = format!("nat on {uplink} from any to any -> ({uplink})\n");
-        let path = "/tmp/tunnet-nat.conf";
-        if std::fs::write(path, &rules).is_err() {
-            tracing::warn!("failed to write pf nat rules");
-            return false;
+        let status = Command::new("pfctl")
+            .args(["-a", "com.tunnet/nat", "-f", "-"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(rules.as_bytes())?;
+                }
+                child.wait()
+            });
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                tracing::warn!(?status, "pfctl masquerade failed");
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(?error, "pfctl spawn failed");
+                return false;
+            }
         }
-        let _ = Command::new("pfctl")
-            .args(["-a", "com.tunnet/nat", "-f", path])
-            .status();
         let _ = Command::new("pfctl").args(["-e"]).status();
         tracing::info!(uplink, "installed pf nat anchor com.tunnet/nat");
         return true;

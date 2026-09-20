@@ -937,7 +937,10 @@ impl DocsMembership {
         acl.replace_bundle(policy.clone());
         self.fire_change_hook();
         if let Ok(json) = serde_json::to_vec_pretty(&members) {
-            let _ = std::fs::write(self.inner.paths.members_cache_file(), json);
+            let _ = tunnet_common::persistence::atomic_write(
+                self.inner.paths.members_cache_file(),
+                json,
+            );
         }
         let all_peers: Vec<tunnet_common::PeerEntry> = routes
             .peers()
@@ -1037,7 +1040,7 @@ impl DocsMembership {
             if let Some(parent) = pending_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            std::fs::write(pending_path, json)?;
+            tunnet_common::persistence::atomic_write(pending_path, json)?;
         }
         Ok(())
     }

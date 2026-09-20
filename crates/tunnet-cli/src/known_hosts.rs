@@ -70,7 +70,8 @@ pub fn upsert_known_hosts_entry(
     if !body.is_empty() {
         body.push('\n');
     }
-    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+    tunnet_common::persistence::atomic_write(&path, body)
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
