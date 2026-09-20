@@ -65,6 +65,8 @@ pub struct DataPlaneActorConfig {
     pub network_id: Uuid,
     #[cfg(not(target_os = "android"))]
     pub underlay_hosts: Vec<Ipv4Addr>,
+    #[cfg(feature = "ssh")]
+    pub ssh_intercept: crate::ssh::SshIntercept,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -398,6 +400,8 @@ impl DataPlaneActor {
             metrics: self.metrics.clone(),
             mtu: self.cfg.mtu,
             in_tun_dns: self.in_tun_dns.clone(),
+            #[cfg(feature = "ssh")]
+            ssh_intercept: self.cfg.ssh_intercept.clone(),
             on_unexpected_end: Box::new(move || {
                 if !exit_gen.is_cancelled()
                     && let Some(actor) = exit_weak.upgrade()
@@ -679,6 +683,8 @@ mod tests {
                 network_id: Uuid::nil(),
                 #[cfg(not(target_os = "android"))]
                 underlay_hosts: vec![],
+                #[cfg(feature = "ssh")]
+                ssh_intercept: crate::ssh::SshIntercept::new(),
             },
             node,
             metrics: test_metrics(),
@@ -829,6 +835,8 @@ mod tests {
                 network_id: Uuid::nil(),
                 #[cfg(not(target_os = "android"))]
                 underlay_hosts: vec![],
+                #[cfg(feature = "ssh")]
+                ssh_intercept: crate::ssh::SshIntercept::new(),
             },
             node,
             metrics: test_metrics(),

@@ -62,6 +62,8 @@ pub struct AcceptDeps {
     pub shared_docs: Option<Docs>,
     pub ingress: IngressRegistry,
     pub events: tokio::sync::broadcast::Sender<LocalEvent>,
+    #[cfg(feature = "ssh")]
+    pub ssh_intercept: crate::ssh::SshIntercept,
 }
 
 /// Spawn the unified ALPN router. Keep the returned [`Router`] alive for the process lifetime.
@@ -76,6 +78,8 @@ pub fn spawn(deps: AcceptDeps) -> Router {
         metrics: deps.metrics,
         direct_auth: deps.direct_auth.clone(),
         ingress: deps.ingress,
+        #[cfg(feature = "ssh")]
+        ssh_intercept: deps.ssh_intercept,
     };
     let stream = StreamProtocolHandler::new(deps.stream_handler);
     let auth_server_ctx = deps.auth_server_ctx.clone();
@@ -148,6 +152,8 @@ struct TunnelHandler {
     metrics: AgentMetrics,
     direct_auth: Option<AuthCache>,
     ingress: IngressRegistry,
+    #[cfg(feature = "ssh")]
+    ssh_intercept: crate::ssh::SshIntercept,
 }
 
 impl fmt::Debug for TunnelHandler {
@@ -180,6 +186,8 @@ impl ProtocolHandler for TunnelHandler {
             let dgram_pool = self.dgram_pool.clone();
             let metrics = self.metrics.clone();
             let direct_auth = self.direct_auth.clone();
+            #[cfg(feature = "ssh")]
+            let ssh_intercept = self.ssh_intercept.clone();
             async move {
                 serve_tunnel_connection(InboundDeps {
                     conn,
@@ -191,6 +199,8 @@ impl ProtocolHandler for TunnelHandler {
                     pool: Some(dgram_pool),
                     metrics,
                     direct_auth,
+                    #[cfg(feature = "ssh")]
+                    ssh_intercept,
                 })
                 .await;
             }

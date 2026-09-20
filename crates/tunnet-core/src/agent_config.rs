@@ -63,6 +63,39 @@ pub struct DirectNetworkSection {
     pub firewall: DirectFirewallSection,
     #[serde(default)]
     pub dns: DirectDnsSection,
+    /// Embedded Tunnet SSH for this Direct network. Disabled unless `enabled`.
+    #[serde(default)]
+    pub ssh: DirectSshSection,
+}
+
+/// Per-network Direct SSH. Fail-closed: disabled, empty allowlist, no wildcards.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct DirectSshSection {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Exact destination OS usernames. Empty means nobody, including root.
+    #[serde(default)]
+    pub users: Vec<String>,
+}
+
+impl DirectSshSection {
+    pub fn allows(&self, requested: &str) -> bool {
+        if !self.enabled || requested.is_empty() {
+            return false;
+        }
+        self.users.iter().any(|u| ssh_user_eq(u, requested))
+    }
+}
+
+fn ssh_user_eq(allowed: &str, requested: &str) -> bool {
+    #[cfg(windows)]
+    {
+        allowed.eq_ignore_ascii_case(requested)
+    }
+    #[cfg(not(windows))]
+    {
+        allowed == requested
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +360,7 @@ impl TunnetConfig {
                             keep_alive: false,
                             firewall: DirectFirewallSection::default(),
                             dns: DirectDnsSection::default(),
+                            ssh: DirectSshSection::default(),
                         },
                     );
                 }
@@ -353,6 +387,7 @@ impl TunnetConfig {
                 keep_alive,
                 firewall: DirectFirewallSection::default(),
                 dns: DirectDnsSection::default(),
+                ssh: DirectSshSection::default(),
             });
         entry.open = open;
         entry.keep_alive = keep_alive;
@@ -370,6 +405,13 @@ impl TunnetConfig {
             .get(network_name)
             .map(|n| n.firewall.to_engine())
             .unwrap_or_else(default_firewall)
+    }
+
+    pub fn ssh_for_network(&self, network_name: &str) -> DirectSshSection {
+        self.direct
+            .get(network_name)
+            .map(|n| n.ssh.clone())
+            .unwrap_or_default()
     }
 
     pub fn set_firewall_for_network(&mut self, network_name: &str, fw: &FirewallConfig) {
@@ -400,6 +442,19 @@ impl TunnetConfig {
         for (name, net) in &self.direct {
             if net.dns.tld.trim().is_empty() {
                 errs.push(format!("direct.{name}.dns: tld must not be empty"));
+            }
+            for (i, user) in net.ssh.users.iter().enumerate() {
+                let user = user.trim();
+                if user.is_empty() {
+                    errs.push(format!("direct.{name}.ssh.users[{i}]: username is empty"));
+                } else if user == "*"
+                    || user.eq_ignore_ascii_case("all")
+                    || user.starts_with("autogroup:")
+                {
+                    errs.push(format!(
+                        "direct.{name}.ssh.users[{i}]: wildcards and autogroups are not allowed"
+                    ));
+                }
             }
             for (i, rule) in net.firewall.rules.iter().enumerate() {
                 if let Err(e) = rule.validate() {
@@ -897,5 +952,44 @@ relay-mode = "custom"
     fn omitted_relay_mode_is_auto() {
         let cfg: TunnetConfig = parse_toml("[network]\nmdns = true\n").unwrap();
         assert_eq!(cfg.network.relay_mode, DirectRelayMode::Auto);
+    }
+
+    #[test]
+    fn direct_ssh_defaults_fail_closed() {
+        let cfg: TunnetConfig = parse_toml("[direct.home]\nopen = true\n").unwrap();
+        let ssh = cfg.ssh_for_network("home");
+        assert!(!ssh.enabled);
+        assert!(ssh.users.is_empty());
+        assert!(!ssh.allows("root"));
+        assert!(!ssh.allows("alice"));
+    }
+
+    #[test]
+    fn direct_ssh_allowlist_is_exact() {
+        let cfg: TunnetConfig = parse_toml(
+            r#"
+[direct.home.ssh]
+enabled = true
+users = ["alice"]
+"#,
+        )
+        .unwrap();
+        let ssh = cfg.ssh_for_network("home");
+        assert!(ssh.allows("alice"));
+        assert!(!ssh.allows("root"));
+        assert!(!ssh.allows("bob"));
+    }
+
+    #[test]
+    fn direct_ssh_rejects_wildcards() {
+        let cfg: TunnetConfig = parse_toml(
+            r#"
+[direct.home.ssh]
+enabled = true
+users = ["*"]
+"#,
+        )
+        .unwrap();
+        assert!(cfg.validate().is_err());
     }
 }

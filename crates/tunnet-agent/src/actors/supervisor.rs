@@ -683,6 +683,8 @@ mod tests {
                     network_id: uuid::Uuid::nil(),
                     #[cfg(not(target_os = "android"))]
                     underlay_hosts: vec![],
+                    #[cfg(feature = "ssh")]
+                    ssh_intercept: crate::ssh::SshIntercept::new(),
                 },
                 node,
                 metrics: test_metrics(),

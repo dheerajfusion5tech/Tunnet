@@ -4,6 +4,16 @@ Tunnet provides identity-based SSH over the mesh. No SSH keys to distribute, no 
 
 You can use Tunnet’s CLI wrapper, or your normal OpenSSH client (`ssh`, `scp`, `sftp`) against `*.tunnet` hostnames.
 
+Direct Mode requires an explicit per-network SSH allowlist in `tunnet.toml`. The daemon account is never the SSH login.
+
+```toml
+[direct.home.ssh]
+enabled = true
+users = ["alice"]
+```
+
+`ssh alice@host` requests the destination OS account `alice`. Tunnet authenticates the source mesh identity, authorizes that account from policy or the Direct allowlist, then runs the session as that OS account. SSH method `none` means mesh identity already authenticated the connection; it is not anonymous access.
+
 ## Quick start
 
 ```bash
@@ -25,13 +35,13 @@ tunnet ssh config
 
 ## How it works
 
-SSH traffic travels over the Tunnet mesh like any other TCP service. Peers authenticate with Tunnet identity. there is no separate SSH key exchange to manage.
+SSH traffic travels over the Tunnet mesh like any other TCP service. Peers authenticate with Tunnet identity. There is no separate SSH key exchange to manage.
 
 Sessions and recordings appear in the dashboard under **SSH**.
 
 ## Direct Mode authorization
 
-Direct Mode authorizes SSH separately from the packet firewall. A connection is accepted only when the source endpoint is a current member of the same Direct network as the destination address, and the requested account is the local account running the agent. Removing a member immediately removes both its transport access and its trusted SSH metadata. Managed Mode continues to use centrally configured SSH policy rules.
+Direct Mode authorizes SSH separately from the packet firewall. A connection is accepted only when the source endpoint is a current member of the same Direct network as the destination address, embedded SSH is enabled for that network, and the requested destination OS account is on that network's allowlist. Removing a member immediately removes both its transport access and its trusted SSH metadata. Managed Mode continues to use centrally configured SSH policy rules.
 
 Allowing TCP port 22 in a Direct firewall rule controls reachability only; it does not grant a different OS identity access to a shell.
 

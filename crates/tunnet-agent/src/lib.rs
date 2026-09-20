@@ -38,8 +38,6 @@ mod system_dns;
 mod recorder;
 #[cfg(feature = "ssh")]
 mod ssh;
-#[cfg(feature = "ssh")]
-mod ssh_nat;
 
 #[cfg(feature = "updater")]
 mod auto_update;
@@ -110,6 +108,11 @@ pub fn run_cli() {
             eprintln!("Core update activation failed: {error:#}");
             exit_with(1);
         }
+    }
+
+    #[cfg(feature = "ssh")]
+    if crate::ssh::maybe_run() {
+        return;
     }
 
     #[cfg(windows)]

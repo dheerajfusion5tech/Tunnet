@@ -293,7 +293,8 @@ pub struct SshEvalCtx<'a> {
     pub dst_tags: &'a [String],
     pub dst_network: &'a str,
     pub requested_user: &'a str,
-    pub local_user: &'a str,
+    /// Interactive local OS accounts for `autogroup:local`. Never the daemon account.
+    pub local_accounts: &'a [String],
 }
 
 /// First matching SSH rule by priority (desc). `None` means implicit deny.
@@ -323,10 +324,10 @@ fn ssh_rule_matches(rule: &SshPolicyRule, ctx: &SshEvalCtx<'_>) -> bool {
     if !src_ok || !dst_ok {
         return false;
     }
-    ssh_user_allowed(&rule.users, ctx.requested_user, ctx.local_user)
+    ssh_user_allowed(&rule.users, ctx.requested_user, ctx.local_accounts)
 }
 
-fn ssh_user_allowed(users: &[String], requested: &str, local_user: &str) -> bool {
+fn ssh_user_allowed(users: &[String], requested: &str, local_accounts: &[String]) -> bool {
     if users.is_empty() {
         return false;
     }
@@ -334,7 +335,9 @@ fn ssh_user_allowed(users: &[String], requested: &str, local_user: &str) -> bool
         if u == AUTOGROUP_NONROOT {
             requested != "root"
         } else if u == AUTOGROUP_LOCAL {
-            requested == local_user
+            local_accounts
+                .iter()
+                .any(|account| account.eq_ignore_ascii_case(requested))
         } else {
             u == requested
         }
@@ -1086,7 +1089,7 @@ mod tests {
             dst_tags: &["server".into()],
             dst_network: "prod",
             requested_user: "root",
-            local_user: "oriel",
+            local_accounts: &["oriel".into()],
         };
         let matched = evaluate_ssh(&rules, &ctx).unwrap();
         assert_eq!(matched.action, SshAction::Accept);
@@ -1113,7 +1116,7 @@ mod tests {
             dst_tags: &[],
             dst_network: "prod",
             requested_user: "root",
-            local_user: "oriel",
+            local_accounts: &["oriel".into()],
         };
         assert!(evaluate_ssh(&rules, &ctx).is_none());
     }

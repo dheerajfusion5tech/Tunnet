@@ -19,10 +19,14 @@ pub struct SessionMeta {
     pub target_user: String,
 }
 
+pub trait SessionKill: Send + Sync {
+    fn kill(&mut self);
+}
+
 pub struct SshRegistryActor {
     // Killers are not Clone, so restarts begin empty (sessions do not survive
     // actor restart; new connections re-register). Metadata mirrors killers.
-    killers: HashMap<Uuid, Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+    killers: HashMap<Uuid, Box<dyn SessionKill>>,
     meta: HashMap<Uuid, SessionMeta>,
     killed: HashSet<Uuid>,
 }
@@ -46,7 +50,7 @@ pub struct RegisterSession {
     pub id: Uuid,
     pub peer_hex: String,
     pub target_user: String,
-    pub killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    pub killer: Box<dyn SessionKill>,
 }
 
 pub struct UnregisterSession {
@@ -103,7 +107,7 @@ impl Message<KillSession> for SshRegistryActor {
         if let Some(mut killer) = self.killers.remove(&id) {
             self.meta.remove(&id);
             self.killed.insert(id);
-            let _ = killer.kill();
+            killer.kill();
             tracing::info!(%id, "killed SSH session by CP request");
             true
         } else {

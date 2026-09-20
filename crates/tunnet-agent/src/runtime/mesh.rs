@@ -35,6 +35,8 @@ use crate::system_dns::DnsController;
 
 use super::AgentConfig;
 use super::AgentHandle;
+#[cfg(feature = "ssh")]
+use crate::ssh::bindings_from_runtime;
 
 /// Live mesh: actor tree, node, and the pieces a host needs to observe or drain.
 pub(crate) struct MeshSession {
@@ -316,14 +318,7 @@ pub(crate) async fn start_mesh(
 
     // Child configs for the supervisor tree.
     #[cfg(feature = "ssh")]
-    let ssh_bindings: HashMap<std::net::Ipv4Addr, uuid::Uuid> = if is_direct {
-        node.direct
-            .iter()
-            .map(|(network_id, runtime)| (runtime.state.self_record.ipv4, *network_id))
-            .collect()
-    } else {
-        HashMap::from([(local_addrs[0], network_id)])
-    };
+    let ssh_intercept = crate::ssh::SshIntercept::new();
     #[cfg(feature = "metrics-serve")]
     let metrics_bind = local_addrs[0];
     let dataplane_cfg = DataPlaneActorConfig {
@@ -338,6 +333,8 @@ pub(crate) async fn start_mesh(
         network_id,
         #[cfg(not(target_os = "android"))]
         underlay_hosts: underlay_hosts.clone(),
+        #[cfg(feature = "ssh")]
+        ssh_intercept: ssh_intercept.clone(),
     };
 
     // Managed control + posture (absent in Direct mode).
@@ -548,6 +545,8 @@ pub(crate) async fn start_mesh(
         metrics.clone(),
         node.direct_auth.clone(),
         ingress.clone(),
+        #[cfg(feature = "ssh")]
+        ssh_intercept.clone(),
     );
 
     let docs_map: HashMap<_, _> = node
@@ -635,28 +634,28 @@ pub(crate) async fn start_mesh(
                 signed: node.signed.clone(),
                 hostname: hostname.clone(),
                 network_name: network_name.clone(),
-                authorization: if is_direct {
-                    crate::ssh::SshAuthorization::Direct {
-                        local_network: uuid::Uuid::nil(),
-                        local_user: String::new(),
-                    }
-                } else {
-                    crate::ssh::SshAuthorization::Managed
-                },
             };
-            if ssh_deps.cp_tx.is_none() {
-                tracing::warn!(
-                    "SSH session reporting disabled (no control-plane WS channel yet); sessions will not appear in the dashboard"
-                );
-            }
-            let ssh_handle =
-                match crate::ssh::spawn_ssh_listener(&ssh_bindings, &node.paths, ssh_deps).await {
+            let bindings =
+                bindings_from_runtime(&node, is_direct, network_id, &network_name, &agent_cfg);
+            let ssh_handle = if bindings.is_empty() {
+                tracing::info!("embedded SSH disabled (no enabled network bindings)");
+                None
+            } else {
+                match crate::ssh::spawn_ssh_listener(
+                    bindings,
+                    ssh_intercept.clone(),
+                    &node.paths,
+                    ssh_deps,
+                )
+                .await
+                {
                     Ok(handle) => Some(handle),
                     Err(e) => {
                         tracing::error!(?e, "failed to start SSH listener");
                         None
                     }
-                };
+                }
+            };
             if let Ok(pubkey) = crate::ssh::host_pubkey_openssh(&node.paths) {
                 if let Some(signed) = node.signed.clone() {
                     let hostname = hostname.clone();
@@ -733,6 +732,8 @@ pub(crate) async fn start_mesh(
         shared_docs: node.docs_engine.clone(),
         ingress: ingress.clone(),
         events: events_tx.clone(),
+        #[cfg(feature = "ssh")]
+        ssh_intercept: ssh_intercept.clone(),
     });
 
     #[cfg(feature = "metrics-serve")]

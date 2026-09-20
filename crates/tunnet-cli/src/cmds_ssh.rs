@@ -222,8 +222,15 @@ async fn run_connect(
         let _ = std::fs::create_dir_all(parent);
     }
 
+    let (user_from_target, target) = split_user_host(&target);
     let host = args_target_for_ssh(&target);
-    let user = user.unwrap_or_else(local_username);
+    let user = user.or(user_from_target).unwrap_or_else(local_username);
+    let _ = run_ssh_keyscan(SshKeyscanArgs {
+        targets: vec![target.clone()],
+        write: true,
+        state_dir: state_dir.clone(),
+    })
+    .await;
     let proxy = proxy_command_string(state_dir.as_deref())?;
 
     let mut args = vec![
@@ -556,6 +563,17 @@ async fn resolve_host(target: &str) -> Option<String> {
     None
 }
 
+fn split_user_host(target: &str) -> (Option<String>, String) {
+    if let Some((user, host)) = target.rsplit_once('@')
+        && !user.is_empty()
+        && !host.is_empty()
+        && !user.contains('/')
+    {
+        return (Some(user.to_string()), host.to_string());
+    }
+    (None, target.to_string())
+}
+
 fn local_username() -> String {
     #[cfg(windows)]
     {
@@ -676,5 +694,15 @@ mod tests {
         assert_eq!(args_target_for_ssh("db"), "db.tunnet");
         assert_eq!(args_target_for_ssh("db.tunnet"), "db.tunnet");
         assert_eq!(args_target_for_ssh("10.0.0.1"), "10.0.0.1");
+    }
+
+    #[test]
+    fn split_user_host_parses_user_at_host() {
+        assert_eq!(
+            split_user_host("alice@db"),
+            (Some("alice".into()), "db".into())
+        );
+        assert_eq!(split_user_host("db"), (None, "db".into()));
+        assert_eq!(split_user_host("10.0.0.1"), (None, "10.0.0.1".into()));
     }
 }

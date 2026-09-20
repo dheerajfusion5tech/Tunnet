@@ -18,8 +18,6 @@ use uuid::Uuid;
 use crate::actors::dataplane::PublishedPlane;
 use crate::metrics::AgentMetrics;
 use crate::qos::{self, OutboundScheduler};
-#[cfg(feature = "ssh")]
-use crate::ssh_nat;
 
 /// Ask the app's `VpnService` to establish a tunnel, then adopt its descriptor.
 ///
@@ -139,6 +137,8 @@ pub struct OutboundDeps {
     pub metrics: AgentMetrics,
     pub mtu: u16,
     pub in_tun_dns: Option<std::sync::Arc<tunnet_core::dns::InTun>>,
+    #[cfg(feature = "ssh")]
+    pub ssh_intercept: crate::ssh::SshIntercept,
 }
 
 fn drop_parse(metrics: &AgentMetrics, err: packet::ParseError) {
@@ -167,6 +167,8 @@ pub async fn run_outbound(deps: OutboundDeps) -> anyhow::Result<()> {
         metrics,
         mtu,
         in_tun_dns,
+        #[cfg(feature = "ssh")]
+        ssh_intercept,
     } = deps;
 
     let scheduler = OutboundScheduler::new(pool.clone(), metrics.clone(), mtu);
@@ -180,7 +182,7 @@ pub async fn run_outbound(deps: OutboundDeps) -> anyhow::Result<()> {
         }
         let self_ip = acl.self_id.load().ip;
         #[cfg(feature = "ssh")]
-        let _ = ssh_nat::rewrite_outbound(&mut buf[..n]);
+        let _ = crate::ssh::rewrite_outbound(&mut buf[..n], &ssh_intercept);
         let packet = &buf[..n];
         let pkt = match packet::parse(packet) {
             Ok(p) => p,
@@ -268,6 +270,8 @@ pub struct InboundDeps {
     pub pool: Option<ConnPool>,
     pub metrics: AgentMetrics,
     pub direct_auth: Option<AuthCache>,
+    #[cfg(feature = "ssh")]
+    pub ssh_intercept: crate::ssh::SshIntercept,
 }
 
 pub async fn serve_tunnel_connection(deps: InboundDeps) {
@@ -281,6 +285,8 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
         pool,
         metrics,
         direct_auth,
+        #[cfg(feature = "ssh")]
+        ssh_intercept,
     } = deps;
     let remote_id = conn.remote_id();
     let remote_hex = format!("{remote_id}");
@@ -414,9 +420,9 @@ pub async fn serve_tunnel_connection(deps: InboundDeps) {
                 break;
             }
             #[cfg(feature = "ssh")]
-            let send_result = if ssh_nat::needs_inbound_rewrite(&dg) {
+            let send_result = if crate::ssh::rewrite_inbound_needed(&dg, &ssh_intercept) {
                 let mut packet = dg.to_vec();
-                let _ = ssh_nat::rewrite_inbound(&mut packet);
+                let _ = crate::ssh::rewrite_inbound(&mut packet, &ssh_intercept);
                 device.send(&packet).await
             } else {
                 device.send(dg.as_ref()).await

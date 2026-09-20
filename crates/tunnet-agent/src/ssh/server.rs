@@ -1,4 +1,4 @@
-//! russh Handler: mesh-identity auth, policy, PTY, recording.
+//! russh Handler: mesh identity, authorization, then platform session execution.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -9,13 +9,15 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use russh::server::{Auth, ChannelOpenHandle, Handler, Msg, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
-use tunnet_common::policy::{SshAction, SshEvalCtx, SshPolicyRule, evaluate_ssh};
 use tunnet_common::ws::ClientMsg;
 use tunnet_core::{AclEngine, ConnPool, RoutingTable, SignedClient};
 use uuid::Uuid;
 
-use super::pty::{PtyRequest, PtySession, spawn_pty};
-use super::sftp::SftpSession;
+use super::authorize::{
+    AuthorizedSession, AuthzFailure, BindingPolicy, CheckState, identify_source,
+};
+use super::exec::{self, LaunchRequest};
+use super::listener::SshBinding;
 use super::tee::{
     RecorderTarget, RecordingTee, make_meta, recorder_unavailable, resolve_recorder_target,
 };
@@ -37,33 +39,18 @@ pub struct SshServeDeps {
     pub store: Option<Arc<RecordingStore>>,
     pub signed: Option<SignedClient>,
     pub hostname: String,
+    #[allow(dead_code)]
     pub network_name: String,
-    pub authorization: SshAuthorization,
-}
-
-#[derive(Clone)]
-pub enum SshAuthorization {
-    Managed,
-    /// Direct SSH is an endpoint-authenticated service: the source must be a
-    /// current member of the same network as the destination address, and may
-    /// request only the account running the agent.
-    Direct {
-        local_network: uuid::Uuid,
-        local_user: String,
-    },
 }
 
 pub struct SshHandler {
     deps: SshServeDeps,
+    binding: SshBinding,
     peer_addr: SocketAddr,
-    peer_hex: String,
-    peer_hostname: Option<String>,
     local_addr: SocketAddr,
-    username: String,
-    auth_ok: bool,
+    authorized: Option<AuthorizedSession>,
     pending_reauth_url: Option<String>,
     check_period_secs: u64,
-    decision: Option<SshPolicyRule>,
     channels: HashMap<ChannelId, Channel<Msg>>,
     pty_in: Arc<Mutex<PtyInMap>>,
     pty_resize: Arc<Mutex<PtyResizeMap>>,
@@ -74,33 +61,20 @@ pub struct SshHandler {
 }
 
 impl SshHandler {
-    pub fn new(deps: SshServeDeps, peer_addr: SocketAddr, local_addr: SocketAddr) -> Self {
-        let ip = match peer_addr.ip() {
-            std::net::IpAddr::V4(ip) => ip,
-            std::net::IpAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
-        };
-        let (peer_hex, peer_hostname) = match deps.routes.lookup_ip(&ip) {
-            Some(peer) => {
-                let hostname = if peer.hostname.is_empty() {
-                    None
-                } else {
-                    Some(peer.hostname.clone())
-                };
-                (peer.endpoint_hex.clone(), hostname)
-            }
-            None => (String::new(), None),
-        };
+    pub fn new(
+        deps: SshServeDeps,
+        binding: SshBinding,
+        peer_addr: SocketAddr,
+        local_addr: SocketAddr,
+    ) -> Self {
         Self {
             deps,
+            binding,
             peer_addr,
-            peer_hex,
-            peer_hostname,
             local_addr,
-            username: String::new(),
-            auth_ok: false,
+            authorized: None,
             pending_reauth_url: None,
             check_period_secs: 3600,
-            decision: None,
             channels: HashMap::new(),
             pty_in: Arc::new(Mutex::new(HashMap::new())),
             pty_resize: Arc::new(Mutex::new(HashMap::new())),
@@ -113,86 +87,55 @@ impl SshHandler {
 
     fn emit_cp(&self, msg: ClientMsg) {
         let Some(tx) = &self.deps.cp_tx else {
-            tracing::debug!(
-                peer = %self.peer_hex,
-                "ssh session event dropped (no control-plane channel)"
-            );
             return;
         };
-        if let Err(e) = tx.try_send(msg) {
-            tracing::warn!(
-                peer = %self.peer_hex,
-                ?e,
-                "ssh session event dropped (control-plane channel full or closed)"
-            );
+        let _ = tx.try_send(msg);
+    }
+
+    fn authorize(&self, user: &str) -> Result<AuthorizedSession, AuthzFailure> {
+        let source = identify_source(self.peer_addr, self.binding.network_id, &self.deps.routes)?;
+        match &self.binding.policy {
+            BindingPolicy::Direct { allowed_users } => super::authorize::authorize_direct(
+                &source,
+                self.binding.network_id,
+                user,
+                allowed_users,
+            ),
+            BindingPolicy::Managed => {
+                let self_id = self.deps.acl.self_id.load();
+                super::authorize::authorize_managed(
+                    &source,
+                    self.binding.network_id,
+                    &self.binding.network_name,
+                    &self_id.endpoint_hex,
+                    &self_id.tags,
+                    user,
+                    &self.deps.acl.bundle.load().ssh_rules,
+                )
+            }
         }
     }
 
-    fn evaluate_policy(&mut self, user: &str) -> Option<SshPolicyRule> {
-        if let SshAuthorization::Direct {
-            local_network,
-            local_user,
-        } = &self.deps.authorization
-        {
-            let source = self
-                .deps
-                .routes
-                .lookup_endpoint_in(*local_network, &self.peer_hex)?;
-            match self.local_addr.ip() {
-                std::net::IpAddr::V4(_) => {}
-                std::net::IpAddr::V6(_) => return None,
-            }
-            if !direct_ssh_authorized(source.network_id, *local_network, user, local_user) {
-                return None;
-            }
-            return Some(SshPolicyRule {
-                src: tunnet_common::policy::Selector::Endpoint(source.endpoint_hex.clone()),
-                dst: tunnet_common::policy::Selector::Any,
-                action: SshAction::Accept,
-                users: vec![local_user.clone()],
-                record: false,
-                recorder: None,
-                enforce_recorder: false,
-                check_period_secs: None,
-                priority: 0,
-            });
+    fn reject_direct() -> Auth {
+        Auth::Reject {
+            proceed_with_methods: Some(MethodSet::empty()),
+            partial_success: false,
         }
-        let empty: Vec<String> = Vec::new();
-        let self_id = self.deps.acl.self_id.load();
-        let peer_info = self.deps.routes.lookup_endpoint(&self.peer_hex);
-        let ctx = SshEvalCtx {
-            src_endpoint_hex: &self.peer_hex,
-            src_tags: peer_info
-                .as_ref()
-                .map(|p| p.tags.as_slice())
-                .unwrap_or(&empty),
-            src_network: &self_id.network,
-            dst_endpoint_hex: &self_id.endpoint_hex,
-            dst_tags: &self_id.tags,
-            dst_network: &self_id.network,
-            requested_user: user,
-            local_user: "",
-        };
-        let bundle = self.deps.acl.bundle.load();
-        evaluate_ssh(&bundle.ssh_rules, &ctx).cloned()
     }
 
-    async fn verify_check(&self, period: u64) -> bool {
+    async fn verify_check(&self, source: &str, period: u64) -> bool {
         let Some(client) = self.deps.signed.as_ref() else {
             return false;
         };
-        match client.verify_ssh_auth(&self.peer_hex, period, None).await {
+        match client.verify_ssh_auth(source, period, None).await {
             Ok(v) => v.get("status").and_then(|s| s.as_str()) == Some("ok"),
             Err(_) => false,
         }
     }
 
-    async fn mint_reauth_url(&self, period: u64) -> Option<String> {
+    async fn mint_reauth_url(&self, source: &str, period: u64) -> Option<String> {
         let client = self.deps.signed.as_ref()?;
-        let eval = client
-            .evaluate_ssh_auth(&self.peer_hex, period)
-            .await
-            .ok()?;
+        let eval = client.evaluate_ssh_auth(source, period).await.ok()?;
         if eval.get("status").and_then(|s| s.as_str()) == Some("ok") {
             return None;
         }
@@ -207,15 +150,22 @@ impl SshHandler {
         command: Option<String>,
         session: &mut Session,
     ) -> Result<(), russh::Error> {
-        if !self.auth_ok {
+        let Some(authorized) = self.authorized.clone() else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+        if command.is_some() && !authorized.capabilities.exec {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        }
+        if command.is_none() && !authorized.capabilities.shell {
             let _ = session.channel_failure(channel);
             return Ok(());
         }
 
-        let recorded = self.decision.as_ref().is_some_and(|r| r.record);
-        let enforce_recorder = self.decision.as_ref().is_some_and(|r| r.enforce_recorder);
-        let recorder_selector = self.decision.as_ref().and_then(|r| r.recorder.clone());
-
+        let recorded = authorized.recording.record;
+        let enforce_recorder = authorized.recording.enforce_recorder;
+        let recorder_selector = authorized.recording.recorder.clone();
         let session_id = Uuid::new_v4();
         let mut tee: Option<RecordingTee> = None;
         if recorded {
@@ -235,11 +185,11 @@ impl SshHandler {
                     if let Some(store) = self.deps.store.as_ref() {
                         let meta = make_meta(
                             &session_id.to_string(),
-                            &self.peer_hex,
-                            self.peer_hostname.clone(),
-                            &self.username,
+                            &authorized.source_endpoint,
+                            authorized.source_hostname.clone(),
+                            &authorized.dest_user,
                             &self.deps.hostname,
-                            &self.deps.network_name,
+                            &self.binding.network_name,
                             self.width,
                             self.height,
                             &self.term,
@@ -262,11 +212,11 @@ impl SshHandler {
                 Some(RecorderTarget::Remote(peer)) => {
                     let meta = make_meta(
                         &session_id.to_string(),
-                        &self.peer_hex,
-                        self.peer_hostname.clone(),
-                        &self.username,
+                        &authorized.source_endpoint,
+                        authorized.source_hostname.clone(),
+                        &authorized.dest_user,
                         &self.deps.hostname,
-                        &self.deps.network_name,
+                        &self.binding.network_name,
                         self.width,
                         self.height,
                         &self.term,
@@ -285,60 +235,58 @@ impl SshHandler {
             }
         }
 
-        let req = PtyRequest {
-            target_user: self.username.clone(),
-            term_type: self.term.clone(),
+        let launched = match exec::spawn_shell(&LaunchRequest {
+            account: authorized.account.clone(),
+            term: self.term.clone(),
             width: self.width,
             height: self.height,
             env_vars: self.env_vars.clone(),
             command,
-        };
-        let pty = match spawn_pty(&req) {
+        }) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(peer = %self.peer_hex, ?e, "pty spawn failed");
+                tracing::warn!(
+                    peer = %authorized.source_endpoint,
+                    source_network = %authorized.source_network,
+                    dest_network = %authorized.dest_network,
+                    mode = ?authorized.mode,
+                    error = %e,
+                    "SSH session execution failed"
+                );
                 let _ = session.channel_failure(channel);
                 return Ok(());
             }
         };
 
         let _ = session.channel_success(channel);
-        let actually_recorded = tee.is_some();
         self.emit_cp(ClientMsg::SshSessionStarted {
             session_id: session_id.to_string(),
-            src_endpoint_id: self.peer_hex.clone(),
-            target_user: self.username.clone(),
-            src_hostname: self.peer_hostname.clone(),
-            recorded: actually_recorded,
+            src_endpoint_id: authorized.source_endpoint.clone(),
+            target_user: authorized.dest_user.clone(),
+            src_hostname: authorized.source_hostname.clone(),
+            recorded: tee.is_some(),
         });
 
-        let PtySession {
-            mut reader,
-            mut writer,
-            mut child_killer,
-            master,
-        } = pty;
-
-        // Session registry is actor-owned; registration is a bounded tell.
         let _ = self
             .deps
             .sessions
             .tell(RegisterSession {
                 id: session_id,
-                peer_hex: self.peer_hex.clone(),
-                target_user: self.username.clone(),
-                killer: child_killer.clone_killer(),
+                peer_hex: authorized.source_endpoint.clone(),
+                target_user: authorized.dest_user.clone(),
+                killer: launched.killer,
             })
             .send()
             .await;
 
         let (pty_out_tx, mut pty_out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
         let (pty_in_tx, pty_in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        let (resize_tx, resize_rx) = std::sync::mpsc::channel::<(u16, u16)>();
-
         self.pty_in.lock().insert(channel, pty_in_tx);
-        self.pty_resize.lock().insert(channel, resize_tx);
+        if let Some(resize) = launched.resize {
+            self.pty_resize.lock().insert(channel, resize);
+        }
 
+        let mut reader = launched.reader;
         std::thread::spawn(move || {
             let mut buf = [0u8; 16 * 1024];
             loop {
@@ -353,7 +301,7 @@ impl SshHandler {
                 }
             }
         });
-
+        let mut writer = launched.writer;
         std::thread::spawn(move || {
             while let Ok(chunk) = pty_in_rx.recv() {
                 if writer.write_all(&chunk).is_err() {
@@ -363,25 +311,13 @@ impl SshHandler {
             }
         });
 
-        let master_for_resize = master;
-        std::thread::spawn(move || {
-            while let Ok((cols, rows)) = resize_rx.recv() {
-                let _ = master_for_resize.resize(portable_pty::PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                });
-            }
-        });
-
         let handle = session.handle();
         let sessions = self.deps.sessions.clone();
         let cp_tx = self.deps.cp_tx.clone();
         let store = self.deps.store.clone();
         let signed = self.deps.signed.clone();
         let acl = self.deps.acl.clone();
-        let peer_hex = self.peer_hex.clone();
+        let peer_hex = authorized.source_endpoint.clone();
         let pty_in = self.pty_in.clone();
         let pty_resize = self.pty_resize.clone();
         let started = std::time::Instant::now();
@@ -408,57 +344,43 @@ impl SshHandler {
             }
             let _ = handle.eof(channel).await;
             let _ = handle.close(channel).await;
-
             pty_in.lock().remove(&channel);
             pty_resize.lock().remove(&channel);
             let killed = sessions
                 .ask(SessionEnded { id: session_id })
                 .await
                 .unwrap_or(false);
-            let _ = child_killer.kill();
             let duration_ms = started.elapsed().as_millis() as u64;
-
             if let Some(t) = tee {
                 match t.finish(store.as_deref(), duration_ms) {
                     Ok(Some((meta, finalized))) => {
-                        if let Some(tx) = &cp_tx
-                            && let Err(e) = tx.try_send(ClientMsg::SshRecordingSaved {
+                        if let Some(tx) = &cp_tx {
+                            let _ = tx.try_send(ClientMsg::SshRecordingSaved {
                                 session_id: meta.session_id.clone(),
                                 recorder_endpoint_id: acl.self_id.load().endpoint_hex.clone(),
                                 duration_ms: Some(duration_ms),
                                 byte_size: finalized.byte_size,
                                 content_sha256: finalized.sha256_hex.clone(),
-                            })
-                        {
-                            tracing::warn!(?e, "SshRecordingSaved event dropped");
+                            });
                         }
-                        if let Some(client) = &signed {
-                            match std::fs::read_to_string(&finalized.path) {
-                                Ok(cast_text) => {
-                                    if let Err(e) = client
-                                        .upload_ssh_recording(
-                                            &meta.session_id,
-                                            &cast_text,
-                                            &finalized.sha256_hex,
-                                        )
-                                        .await
-                                    {
-                                        tracing::warn!(?e, "failed to upload local recording");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(?e, "failed to read local cast for upload")
-                                }
-                            }
+                        if let Some(client) = &signed
+                            && let Ok(cast_text) = std::fs::read_to_string(&finalized.path)
+                        {
+                            let _ = client
+                                .upload_ssh_recording(
+                                    &meta.session_id,
+                                    &cast_text,
+                                    &finalized.sha256_hex,
+                                )
+                                .await;
                         }
                     }
                     Ok(None) => {}
                     Err(e) => tracing::warn!(?e, "failed to finalize recording"),
                 }
             }
-
-            if let Some(tx) = &cp_tx
-                && let Err(e) = tx.try_send(ClientMsg::SshSessionEnded {
+            if let Some(tx) = &cp_tx {
+                let _ = tx.try_send(ClientMsg::SshSessionEnded {
                     session_id: session_id.to_string(),
                     status: if killed {
                         "killed".into()
@@ -466,95 +388,77 @@ impl SshHandler {
                         "ended".into()
                     },
                     duration_ms: Some(duration_ms),
-                })
-            {
-                tracing::warn!(?e, %session_id, "SshSessionEnded event dropped");
+                });
             }
             tracing::debug!(%peer_hex, %session_id, "ssh session finished");
         });
-
         Ok(())
     }
-}
-
-fn direct_ssh_authorized(
-    source_network: uuid::Uuid,
-    target_network: uuid::Uuid,
-    requested_user: &str,
-    local_user: &str,
-) -> bool {
-    source_network == target_network
-        && !local_user.is_empty()
-        && requested_user.eq_ignore_ascii_case(local_user)
 }
 
 impl Handler for SshHandler {
     type Error = russh::Error;
 
     async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
-        self.username = user.to_string();
-        if self.peer_hex.is_empty() {
-            tracing::warn!(addr = %self.peer_addr, "ssh from unknown mesh IP");
-            return Ok(Auth::reject());
-        }
-
-        let decision = self.evaluate_policy(user);
-        self.decision = decision.clone();
-        match decision {
-            None => {
-                if matches!(self.deps.authorization, SshAuthorization::Direct { .. }) {
-                    tracing::info!(
-                        peer = %self.peer_hex,
-                        %user,
-                        local = %self.local_addr,
-                        "Direct SSH denied (peer is not a current member of this network or user is not the local agent account)"
-                    );
-                } else {
-                    tracing::info!(peer = %self.peer_hex, %user, "ssh denied (no matching rule)");
-                }
-                Ok(Auth::reject())
+        match self.authorize(user) {
+            Err(failure) => {
+                tracing::info!(
+                    addr = %self.peer_addr,
+                    local = %self.local_addr,
+                    network = %self.binding.network_id,
+                    user,
+                    reason = %failure.log_message(),
+                    "SSH authorization failed"
+                );
+                Ok(Self::reject_direct())
             }
-            Some(rule) if rule.action == SshAction::Deny => {
-                tracing::info!(peer = %self.peer_hex, %user, "ssh denied by policy");
-                Ok(Auth::reject())
-            }
-            Some(rule) if rule.action == SshAction::Check => {
-                let period = rule.check_period_secs.unwrap_or(3600);
-                self.check_period_secs = period;
-                if self.verify_check(period).await {
-                    self.auth_ok = true;
-                    return Ok(Auth::Accept);
-                }
-                if let Some(url) = self.mint_reauth_url(period).await {
-                    self.pending_reauth_url = Some(url);
-                    let mut methods = MethodSet::empty();
-                    methods.push(MethodKind::KeyboardInteractive);
-                    Ok(Auth::Reject {
-                        proceed_with_methods: Some(methods),
-                        partial_success: false,
-                    })
-                } else if self.verify_check(period).await {
-                    self.auth_ok = true;
+            Ok(session) => match session.check {
+                CheckState::None => {
+                    self.authorized = Some(session);
                     Ok(Auth::Accept)
-                } else {
-                    Ok(Auth::reject())
                 }
-            }
-            Some(_) => {
-                self.auth_ok = true;
-                Ok(Auth::Accept)
-            }
+                CheckState::Required { period_secs } => {
+                    self.check_period_secs = period_secs;
+                    if self
+                        .verify_check(&session.source_endpoint, period_secs)
+                        .await
+                    {
+                        self.authorized = Some(session);
+                        return Ok(Auth::Accept);
+                    }
+                    if let Some(url) = self
+                        .mint_reauth_url(&session.source_endpoint, period_secs)
+                        .await
+                    {
+                        self.pending_reauth_url = Some(url);
+                        self.authorized = Some(session);
+                        let mut methods = MethodSet::empty();
+                        methods.push(MethodKind::KeyboardInteractive);
+                        Ok(Auth::Reject {
+                            proceed_with_methods: Some(methods),
+                            partial_success: false,
+                        })
+                    } else {
+                        Ok(Auth::reject())
+                    }
+                }
+            },
         }
     }
 
     async fn auth_keyboard_interactive(
         &mut self,
-        user: &str,
+        _user: &str,
         _submethods: &str,
         response: Option<russh::server::Response<'_>>,
     ) -> Result<Auth, Self::Error> {
-        self.username = user.to_string();
+        if !matches!(self.binding.policy, BindingPolicy::Managed) {
+            return Ok(Self::reject_direct());
+        }
         let Some(url) = self.pending_reauth_url.clone() else {
+            return Ok(Auth::reject());
+        };
+        let Some(session) = self.authorized.as_ref() else {
             return Ok(Auth::reject());
         };
         if response.is_none() {
@@ -566,8 +470,10 @@ impl Handler for SshHandler {
                 prompts: Cow::Borrowed(&[(Cow::Borrowed("Press Enter when done: "), true)]),
             });
         }
-        if self.verify_check(self.check_period_secs).await {
-            self.auth_ok = true;
+        if self
+            .verify_check(&session.source_endpoint, self.check_period_secs)
+            .await
+        {
             self.pending_reauth_url = None;
             Ok(Auth::Accept)
         } else {
@@ -617,6 +523,14 @@ impl Handler for SshHandler {
         variable_value: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if !self
+            .authorized
+            .as_ref()
+            .is_some_and(|s| s.capabilities.env_forward)
+        {
+            session.channel_success(channel)?;
+            return Ok(());
+        }
         if matches!(
             variable_name,
             "LANG"
@@ -640,27 +554,64 @@ impl Handler for SshHandler {
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if !self.auth_ok || name != "sftp" {
+        let Some(authorized) = self.authorized.as_ref() else {
+            let _ = session.channel_failure(channel);
+            return Ok(());
+        };
+        if name != "sftp" || !authorized.capabilities.sftp {
             let _ = session.channel_failure(channel);
             return Ok(());
         }
-
         let Some(ch) = self.channels.remove(&channel) else {
             let _ = session.channel_failure(channel);
             return Ok(());
         };
-
-        let sftp = match SftpSession::new(&self.username) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(peer = %self.peer_hex, user = %self.username, ?e, "sftp start failed");
-                let _ = session.channel_failure(channel);
-                return Ok(());
+        match exec::spawn_sftp(&authorized.account) {
+            Ok(mut child) => {
+                let _ = session.channel_success(channel);
+                let stream = ch.into_stream();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut stdin = match child.stdin.take() {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let mut stdout = match child.stdout.take() {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let (mut reader, mut writer) = tokio::io::split(stream);
+                    let upload = async {
+                        let mut buf = [0u8; 8192];
+                        loop {
+                            let n = reader.read(&mut buf).await?;
+                            if n == 0 {
+                                break;
+                            }
+                            stdin.write_all(&buf[..n]).await?;
+                        }
+                        Ok::<_, std::io::Error>(())
+                    };
+                    let download = async {
+                        let mut buf = [0u8; 8192];
+                        loop {
+                            let n = stdout.read(&mut buf).await?;
+                            if n == 0 {
+                                break;
+                            }
+                            writer.write_all(&buf[..n]).await?;
+                        }
+                        Ok::<_, std::io::Error>(())
+                    };
+                    let _ = tokio::try_join!(upload, download);
+                    let _ = child.kill().await;
+                });
             }
-        };
-
-        let _ = session.channel_success(channel);
-        russh_sftp::server::run(ch.into_stream(), sftp).await;
+            Err(e) => {
+                tracing::warn!(error = %e, "SFTP spawn failed");
+                let _ = session.channel_failure(channel);
+            }
+        }
         Ok(())
     }
 
@@ -721,25 +672,5 @@ impl Handler for SshHandler {
         self.pty_resize.lock().remove(&channel);
         session.close(channel)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod direct_policy_tests {
-    use super::direct_ssh_authorized;
-    use uuid::Uuid;
-
-    #[test]
-    fn admitted_same_network_peer_may_use_only_local_account() {
-        let network = Uuid::new_v4();
-        assert!(direct_ssh_authorized(network, network, "ADMIN", "admin"));
-        assert!(!direct_ssh_authorized(network, network, "root", "admin"));
-        assert!(!direct_ssh_authorized(
-            Uuid::new_v4(),
-            network,
-            "admin",
-            "admin"
-        ));
-        assert!(!direct_ssh_authorized(network, network, "admin", ""));
     }
 }

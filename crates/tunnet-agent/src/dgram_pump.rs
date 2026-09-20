@@ -29,6 +29,7 @@ pub fn install_dialer_datagram_pump(
     metrics: AgentMetrics,
     direct_auth: Option<AuthCache>,
     ingress: IngressRegistry,
+    #[cfg(feature = "ssh")] ssh_intercept: crate::ssh::SshIntercept,
 ) {
     let pool_for_hook = pool.clone();
     pool.set_tunnel_hook(Arc::new(move |peer, conn| {
@@ -41,6 +42,8 @@ pub fn install_dialer_datagram_pump(
         let direct_auth = direct_auth.clone();
         let pool = pool_for_hook.clone();
         let ingress = ingress.clone();
+        #[cfg(feature = "ssh")]
+        let ssh_intercept = ssh_intercept.clone();
         ingress.force_spawn(peer, async move {
             if tun_slot.load_full().is_none() {
                 return;
@@ -55,6 +58,8 @@ pub fn install_dialer_datagram_pump(
                 pool: Some(pool),
                 metrics,
                 direct_auth,
+                #[cfg(feature = "ssh")]
+                ssh_intercept,
             })
             .await;
         });

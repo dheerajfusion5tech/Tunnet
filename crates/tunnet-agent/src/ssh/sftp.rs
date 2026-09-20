@@ -1,28 +1,26 @@
-//! SFTP subsystem: filesystem access scoped to the target SSH user.
+//! SFTP subsystem: filesystem access as the authorized OS account.
+//!
+//! This handler must only run after the process has already assumed the
+//! destination user's identity.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions, ReadDir};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-#[cfg(unix)]
-use std::sync::Mutex as StdMutex;
 
-use anyhow::Context;
-#[cfg(unix)]
-use anyhow::bail;
 use russh_sftp::protocol::{
     Attrs, Data, File as SftpFile, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode,
     Version,
 };
 use russh_sftp::server::Handler;
 
-use super::user::{self, UserInfo};
-
-#[cfg(unix)]
-static PRIV_LOCK: StdMutex<()> = StdMutex::new(());
+struct SftpUser {
+    username: String,
+    home_dir: PathBuf,
+}
 
 pub struct SftpSession {
-    user: UserInfo,
+    user: SftpUser,
     next_handle: u64,
     files: HashMap<String, File>,
     dirs: HashMap<String, DirState>,
@@ -35,21 +33,9 @@ struct DirState {
 }
 
 impl SftpSession {
-    pub fn new(target_user: &str) -> anyhow::Result<Self> {
-        let user = user::lookup(target_user).context("sftp user lookup")?;
-        #[cfg(unix)]
-        {
-            let euid = unsafe { libc::geteuid() };
-            if euid != 0 && euid != user.uid {
-                bail!(
-                    "cannot run SFTP as `{}` (agent uid {euid}, target uid {})",
-                    user.username,
-                    user.uid
-                );
-            }
-        }
+    pub fn for_account(username: String, home_dir: PathBuf) -> anyhow::Result<Self> {
         Ok(Self {
-            user,
+            user: SftpUser { username, home_dir },
             next_handle: 1,
             files: HashMap::new(),
             dirs: HashMap::new(),
@@ -98,14 +84,7 @@ impl SftpSession {
     }
 
     fn with_creds<T>(&self, f: impl FnOnce() -> io::Result<T>) -> Result<T, StatusCode> {
-        #[cfg(unix)]
-        {
-            as_user(&self.user, f)
-        }
-        #[cfg(not(unix))]
-        {
-            f().map_err(Self::map_io)
-        }
+        f().map_err(Self::map_io)
     }
 
     fn metadata_attrs(meta: &fs::Metadata) -> FileAttributes {
@@ -177,39 +156,6 @@ impl SftpSession {
         }
         opts
     }
-}
-
-#[cfg(unix)]
-fn as_user<T>(user: &UserInfo, f: impl FnOnce() -> io::Result<T>) -> Result<T, StatusCode> {
-    let _guard = PRIV_LOCK.lock().map_err(|_| StatusCode::Failure)?;
-
-    let euid = unsafe { libc::geteuid() };
-    let egid = unsafe { libc::getegid() };
-
-    if euid == user.uid {
-        return f().map_err(SftpSession::map_io);
-    }
-    if euid != 0 {
-        return Err(StatusCode::PermissionDenied);
-    }
-
-    let switched = unsafe { libc::setegid(user.gid) == 0 && libc::seteuid(user.uid) == 0 };
-    if !switched {
-        unsafe {
-            let _ = libc::seteuid(euid);
-            let _ = libc::setegid(egid);
-        }
-        return Err(StatusCode::PermissionDenied);
-    }
-
-    let result = f();
-
-    unsafe {
-        let _ = libc::seteuid(euid);
-        let _ = libc::setegid(egid);
-    }
-
-    result.map_err(SftpSession::map_io)
 }
 
 impl Handler for SftpSession {

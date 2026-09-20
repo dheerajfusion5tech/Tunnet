@@ -20,6 +20,8 @@ pub struct OutboundSpawn {
     pub metrics: AgentMetrics,
     pub mtu: u16,
     pub in_tun_dns: Option<std::sync::Arc<tunnet_core::dns::InTun>>,
+    #[cfg(feature = "ssh")]
+    pub ssh_intercept: crate::ssh::SshIntercept,
     /// Called when the loop ends without shutdown (abnormal service death).
     pub on_unexpected_end: Box<dyn FnOnce() + Send + 'static>,
 }
@@ -34,6 +36,8 @@ pub fn spawn_outbound(spawn: OutboundSpawn) -> tokio::task::JoinHandle<()> {
         metrics,
         mtu,
         in_tun_dns,
+        #[cfg(feature = "ssh")]
+        ssh_intercept,
         on_unexpected_end,
     } = spawn;
     tokio::spawn(async move {
@@ -46,6 +50,8 @@ pub fn spawn_outbound(spawn: OutboundSpawn) -> tokio::task::JoinHandle<()> {
             metrics,
             mtu,
             in_tun_dns,
+            #[cfg(feature = "ssh")]
+            ssh_intercept,
         })
         .await
         {
