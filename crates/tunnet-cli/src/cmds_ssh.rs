@@ -360,9 +360,7 @@ pub async fn run_ssh_proxy(args: SshProxyArgs) -> anyhow::Result<()> {
     let addr = format!("{}:{}", ip, args.port);
     let stream = tokio::net::TcpStream::connect(&addr)
         .await
-        .with_context(|| {
-            format!("cannot connect to {addr} over the mesh - is the data plane up (`tunnet up`)?")
-        })?;
+        .map_err(|error| anyhow::anyhow!(ssh_connect_error(&addr, &error)))?;
     let _ = stream.set_nodelay(true);
 
     let (mut reader, mut writer) = stream.into_split();
@@ -387,6 +385,21 @@ pub async fn run_ssh_proxy(args: SshProxyArgs) -> anyhow::Result<()> {
     let _ = writer.shutdown().await;
     result?;
     Ok(())
+}
+
+fn ssh_connect_error(addr: &str, error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::ConnectionRefused => format!(
+            "SSH service at {addr} refused the connection; mesh routing succeeded, but the destination SSH listener is unavailable: {error}"
+        ),
+        std::io::ErrorKind::TimedOut => format!(
+            "SSH connection to {addr} timed out after entering the mesh; check the destination firewall and SSH listener: {error}"
+        ),
+        std::io::ErrorKind::NetworkUnreachable | std::io::ErrorKind::HostUnreachable => format!(
+            "cannot route to {addr} over the mesh; check `tunnet status` and `tunnet up`: {error}"
+        ),
+        _ => format!("cannot connect to SSH service at {addr} over the mesh: {error}"),
+    }
 }
 
 const SSH_CONFIG_BEGIN: &str = "# BEGIN TUNNET";
@@ -627,6 +640,15 @@ pub async fn run_ssh_keyscan(args: SshKeyscanArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_connect_errors_distinguish_service_from_mesh_failures() {
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(ssh_connect_error("10.0.0.2:22", &refused).contains("mesh routing succeeded"));
+
+        let unreachable = std::io::Error::from(std::io::ErrorKind::NetworkUnreachable);
+        assert!(ssh_connect_error("10.0.0.2:22", &unreachable).contains("cannot route"));
+    }
 
     #[test]
     fn upsert_replaces_existing_block() {

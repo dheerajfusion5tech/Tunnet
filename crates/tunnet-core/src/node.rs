@@ -26,9 +26,9 @@ use crate::direct::PresenceTable;
 #[cfg(feature = "direct")]
 use crate::direct::{
     AUTH_ALPN, AuthCache, CONNECT_ALPN, DirectAuthHook, DirectAuthority, DocsBootstrap,
-    DocsMembership, JOIN_ALPN, MembershipEntry, NetworkGrant, signing_key_from_hex,
-    spawn_discovery, spawn_seed_auth, validate_member_against_genesis, verify_genesis,
-    verify_member_record, verifying_key_from_hex,
+    DocsMembership, JOIN_ALPN, NetworkGrant, signing_key_from_hex, spawn_discovery,
+    spawn_seed_auth, validate_member_against_genesis, verify_genesis, verify_member_record,
+    verifying_key_from_hex,
 };
 #[cfg(any(feature = "managed", feature = "direct"))]
 use crate::direct::{
@@ -874,17 +874,6 @@ async fn bootstrap_one_direct_network(
         crate::direct::FirewallEngine::from_config(&fw_cfg, net_ipv4, args.my_id_hex.to_string());
     let spoof_tracker = crate::direct::SpoofTracker::new();
 
-    let self_entry = MembershipEntry {
-        endpoint_id: args.my_id_hex.to_string(),
-        hostname: direct.hostname.clone(),
-        ipv4: net_ipv4,
-        tags: direct.self_record.tags.clone(),
-        joined_at: direct.self_record.joined_at,
-        coordinator: direct.coordinator,
-        status: "active".into(),
-        ssh_host_key: None,
-    };
-
     let coordinator_signing_key = direct
         .coordinator_signing_key
         .as_ref()
@@ -942,12 +931,10 @@ async fn bootstrap_one_direct_network(
         paths: args.paths,
         direct,
         self_endpoint_id: args.my_id_hex,
-        self_entry,
         coordinator_signing_key,
         endpoint_signing_key: args.endpoint_signing_key.clone(),
         coordinator_verifying_key,
         content_key: content_key.clone(),
-        network_grant: network_grant.clone(),
         blobs: args.blobs.clone(),
         routes: args.routes.clone(),
         acl: args.acl.clone(),

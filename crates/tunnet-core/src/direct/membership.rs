@@ -182,7 +182,6 @@ struct DocsInner {
     network_epoch: Arc<AtomicU64>,
     content_key: String,
     revoked: Arc<Mutex<HashSet<String>>>,
-    self_grant: Option<NetworkGrant>,
     hostname: String,
     auto_accept_firewall: bool,
     self_endpoint_id: String,
@@ -204,12 +203,10 @@ pub struct DocsBootstrap<'a> {
     pub paths: &'a StatePaths,
     pub direct: &'a DirectState,
     pub self_endpoint_id: &'a str,
-    pub self_entry: MembershipEntry,
     pub coordinator_signing_key: Option<SigningKey>,
     pub endpoint_signing_key: SigningKey,
     pub coordinator_verifying_key: String,
     pub content_key: String,
-    pub network_grant: Option<NetworkGrant>,
     pub blobs: FsStore,
     pub routes: RoutingTable,
     pub acl: AclEngine,
@@ -301,12 +298,10 @@ impl DocsMembership {
             paths,
             direct,
             self_endpoint_id,
-            self_entry,
             coordinator_signing_key,
             endpoint_signing_key,
             coordinator_verifying_key,
             content_key,
-            network_grant,
             blobs,
             routes,
             acl,
@@ -345,7 +340,6 @@ impl DocsMembership {
                 network_epoch: network_epoch.clone(),
                 content_key,
                 revoked: revoked.clone(),
-                self_grant: network_grant,
                 hostname: direct.hostname.clone(),
                 auto_accept_firewall: direct.auto_accept_firewall,
                 self_endpoint_id: self_endpoint_id.to_string(),
@@ -360,11 +354,15 @@ impl DocsMembership {
 
         if direct.coordinator && direct.doc_ticket.is_none() && direct.namespace_id.is_none() {
             membership.publish_genesis(&direct.genesis).await?;
-            membership
-                .write_self_record(&self_entry)
-                .await
-                .context("write coordinator self record")?;
         }
+        // Every member may republish the immutable coordinator-signed record
+        // it received at admission. This makes self membership available even
+        // when the first document sync has not completed, without giving the
+        // member coordinator signing authority.
+        membership
+            .write_member_record(&direct.self_record)
+            .await
+            .context("publish admitted self record")?;
 
         membership.rebuild_from_doc().await?;
         membership.apply_to_routes(&routes, &acl, &policy);
@@ -461,23 +459,6 @@ impl DocsMembership {
 
     pub fn genesis(&self) -> Option<Genesis> {
         self.inner.genesis.read().clone()
-    }
-
-    async fn write_self_record(&self, entry: &MembershipEntry) -> anyhow::Result<()> {
-        let grant = if let Some(g) = &self.inner.self_grant {
-            g.clone()
-        } else {
-            self.issue_grant(
-                &entry.endpoint_id,
-                if entry.coordinator {
-                    MemberRole::Coordinator
-                } else {
-                    MemberRole::Member
-                },
-            )?
-        };
-        let record = self.build_record(entry, grant, 1)?;
-        self.write_member_record(&record).await
     }
 
     fn issue_grant(&self, endpoint_id: &str, role: MemberRole) -> anyhow::Result<NetworkGrant> {
